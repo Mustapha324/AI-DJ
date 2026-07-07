@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+env/
+
+# Local environment
+.env
+.env.*
+
+# Generated project artifacts
+backend/uploads/*
+backend/analysis_output/*
+output/*
+music/*
+
+# Keep empty local folders visible in the repo.
+!backend/uploads/.gitkeep
+!backend/analysis_output/.gitkeep
+!output/.gitkeep
+!music/.gitkeep
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
