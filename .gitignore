@@ -15,12 +15,16 @@ env/
 # Generated project artifacts
 backend/uploads/*
 backend/analysis_output/*
+backend/mixes/*
+backend/jobs/*
 output/*
 music/*
 
 # Keep empty local folders visible in the repo.
 !backend/uploads/.gitkeep
 !backend/analysis_output/.gitkeep
+!backend/mixes/.gitkeep
+!backend/jobs/.gitkeep
 !output/.gitkeep
 !music/.gitkeep
 

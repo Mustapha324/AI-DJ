@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+import warnings
 from pathlib import Path
 
 import librosa
@@ -19,10 +21,17 @@ class AudioAnalysisError(Exception):
     """Raised when an uploaded audio file cannot be decoded or analyzed."""
 
 
+logger = logging.getLogger(__name__)
+
+
 class TrackAnalyzer:
     def analyze(self, audio_path: Path, track_id: str, original_file_name: str) -> TrackAnalysis:
         try:
-            audio, sample_rate = librosa.load(audio_path, sr=None, mono=True)
+            with warnings.catch_warnings(record=True) as captured_warnings:
+                warnings.simplefilter("always")
+                audio, sample_rate = librosa.load(audio_path, sr=None, mono=True)
+            for warning in captured_warnings:
+                logger.warning("Nonfatal audio decoder warning for %s: %s", audio_path.name, warning.message)
         except Exception as exc:  # librosa can raise different backend-specific errors.
             raise AudioAnalysisError("The uploaded file could not be decoded as audio.") from exc
 

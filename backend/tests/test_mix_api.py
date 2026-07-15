@@ -1,0 +1,117 @@
+from __future__ import annotations
+
+
+def _analyze_three_tracks(client, synthetic_mp3_named_uploads) -> list[str]:
+    response = client.post(
+        "/api/tracks/analyze-batch",
+        files=[("files", upload) for upload in synthetic_mp3_named_uploads],
+    )
+    assert response.status_code == 201
+    return [track["track_id"] for track in response.json()["tracks"]]
+
+
+def test_mix_plan_creation_and_transition_timing(client, synthetic_mp3_named_uploads):
+    track_ids = _analyze_three_tracks(client, synthetic_mp3_named_uploads)
+
+    response = client.post(
+        "/api/mixes/plan",
+        json={
+            "track_ids": track_ids,
+            "mix_name": "First AI Mix",
+            "transition_bars": 1,
+            "max_play_seconds_per_track": 45,
+            "auto_order": True,
+            "mix_direction": "smooth house with club energy",
+            "use_transition_sfx": True,
+        },
+    )
+
+    assert response.status_code == 201
+    plan = response.json()
+    assert plan["mix_name"] == "First AI Mix"
+    assert sorted(plan["track_order"]) == sorted(track_ids)
+    assert plan["mix_direction"] == "smooth house with club energy"
+    assert plan["use_transition_sfx"] is True
+    assert plan["max_play_seconds_per_track"] == 45
+    assert len(plan["placements"]) == 3
+    assert len(plan["transitions"]) == 2
+    for transition in plan["transitions"]:
+        assert transition["source_transition_start"] < transition["source_transition_end"]
+        assert transition["timeline_start_time"] < transition["timeline_end_time"]
+        assert transition["target_transition_start"] >= 0.0
+        assert transition["target_transition_end"] > transition["target_transition_start"]
+        assert transition["duration_seconds"] > 0
+        assert transition["sfx"] == ["noise_sweep", "impact"]
+    for placement in plan["placements"]:
+        assert placement["source_end_time"] - placement["source_start_time"] <= 45
+
+
+def test_render_mix_creates_nonempty_audio_and_streams_it(client, synthetic_mp3_named_uploads):
+    track_ids = _analyze_three_tracks(client, synthetic_mp3_named_uploads)
+    plan_response = client.post(
+        "/api/mixes/plan",
+        json={
+            "track_ids": track_ids[:2],
+            "mix_name": "Rendered Test Mix",
+            "transition_bars": 1,
+            "auto_order": False,
+        },
+    )
+    mix_id = plan_response.json()["mix_id"]
+
+    render_response = client.post("/api/mixes/render", json={"mix_id": mix_id})
+
+    assert render_response.status_code == 201
+    record = render_response.json()
+    assert record["status"] == "completed"
+    assert record["output_filename"].endswith(".wav")
+    assert record["duration_seconds"] > 0
+
+    audio_response = client.get(f"/api/mixes/{mix_id}/audio")
+
+    assert audio_response.status_code == 200
+    assert len(audio_response.content) > 44
+    assert audio_response.headers["content-type"].startswith("audio/wav")
+
+
+def test_render_mix_failure_is_reported(client, synthetic_mp3_named_uploads):
+    track_ids = _analyze_three_tracks(client, synthetic_mp3_named_uploads)
+    plan_response = client.post(
+        "/api/mixes/plan",
+        json={
+            "track_ids": track_ids[:2],
+            "mix_name": "Broken Render",
+            "transition_bars": 1,
+            "auto_order": False,
+        },
+    )
+    plan = plan_response.json()
+    plan["placements"][0]["track_id"] = "f" * 32
+
+    render_response = client.post("/api/mixes/render", json={"plan": plan})
+
+    assert render_response.status_code == 422
+    assert "was not found" in render_response.json()["detail"]
+
+
+def test_mix_and_job_records_can_be_retrieved(client, synthetic_mp3_named_uploads):
+    track_ids = _analyze_three_tracks(client, synthetic_mp3_named_uploads)
+    plan_response = client.post(
+        "/api/mixes/plan",
+        json={
+            "track_ids": track_ids[:2],
+            "mix_name": "Record Test Mix",
+            "transition_bars": 1,
+        },
+    )
+    mix_id = plan_response.json()["mix_id"]
+
+    render_response = client.post("/api/mixes/render", json={"mix_id": mix_id})
+    record = render_response.json()
+    mix_response = client.get(f"/api/mixes/{mix_id}")
+    job_response = client.get(f"/api/jobs/{record['job_id']}")
+
+    assert mix_response.status_code == 200
+    assert mix_response.json()["status"] == "completed"
+    assert job_response.status_code == 200
+    assert job_response.json()["status"] == "completed"

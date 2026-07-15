@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>AI DJ Easy Mode</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <a class="brand" href="/">AI DJ</a>
+      <nav class="mode-nav" aria-label="Mode">
+        <a class="mode-link active" href="/">Easy Mode</a>
+        <a class="mode-link" href="/docs">Advanced Mode</a>
+      </nav>
+    </header>
+
+    <main class="app-shell">
+      <section class="control-panel" aria-labelledby="easy-title">
+        <div class="panel-heading">
+          <p class="eyebrow">Easy Mode</p>
+          <h1 id="easy-title">Search or drop tracks, then go live</h1>
+        </div>
+
+        <section class="catalog-panel" aria-labelledby="catalog-title">
+          <div class="section-head">
+            <h2 id="catalog-title">Search Music</h2>
+            <button id="loadLibraryButton" type="button" class="ghost small-button">Show Library</button>
+          </div>
+          <div class="search-row">
+            <input
+              id="catalogSearch"
+              type="search"
+              maxlength="120"
+              placeholder="Search saved songs, BPM, key, or filename"
+            />
+            <button id="catalogSearchButton" type="button">Search</button>
+          </div>
+          <ul id="catalogResults" class="catalog-results"></ul>
+        </section>
+
+        <div id="dropZone" class="drop-zone" tabindex="0">
+          <input id="fileInput" class="hidden-input" type="file" accept=".mp3,audio/mpeg" multiple />
+          <input
+            id="folderInput"
+            class="hidden-input"
+            type="file"
+            accept=".mp3,audio/mpeg"
+            webkitdirectory
+            directory
+            multiple
+          />
+          <div>
+            <strong>Drop MP3s or a folder here</strong>
+            <span>Then make a live or downloadable mix.</span>
+          </div>
+          <div class="file-actions">
+            <button id="chooseFilesButton" type="button">Choose MP3s</button>
+            <button id="chooseFolderButton" type="button" class="secondary">Choose Folder</button>
+          </div>
+        </div>
+
+        <label class="field-label" for="mixDirection">Mix direction</label>
+        <textarea
+          id="mixDirection"
+          rows="3"
+          maxlength="240"
+          placeholder="Example: smooth house, club energy, more hip-hop cuts, chill lounge"
+        ></textarea>
+
+        <div class="options-row">
+          <label class="check-option">
+            <input id="autoOrder" type="checkbox" checked />
+            <span>Auto order</span>
+          </label>
+          <label class="check-option">
+            <input id="useSfx" type="checkbox" checked />
+            <span>DJ transition SFX</span>
+          </label>
+          <label class="small-field">
+            <span>Minutes</span>
+            <input id="targetMinutes" type="number" min="1" max="180" step="1" placeholder="Auto" />
+          </label>
+          <label class="small-field">
+            <span>Sec/song</span>
+            <input id="playSeconds" type="number" min="15" max="1800" step="5" value="75" />
+          </label>
+          <label class="small-field">
+            <span>Blend</span>
+            <input id="transitionSeconds" type="number" min="2" max="30" step="1" value="10" />
+          </label>
+        </div>
+
+        <div class="run-actions">
+          <button id="liveMixButton" type="button" class="primary">Make Live Mix</button>
+          <button id="transitionNowButton" type="button" disabled>Transition Now</button>
+          <button id="stopLiveButton" type="button" class="secondary" disabled>Stop Live</button>
+          <button id="downloadMixButton" type="button">Render Download</button>
+          <button id="clearButton" type="button" class="ghost">Clear</button>
+        </div>
+      </section>
+
+      <section class="results-panel" aria-label="Mix results">
+        <div class="status-strip">
+          <span id="statusText">Ready</span>
+          <div class="progress-shell" aria-hidden="true">
+            <div id="progressBar" class="progress-bar"></div>
+          </div>
+        </div>
+
+        <div class="split-grid">
+          <section class="list-panel" aria-labelledby="files-title">
+            <div class="section-head">
+              <h2 id="files-title">Selected Files</h2>
+              <span id="fileCount" class="pill">0 files</span>
+            </div>
+            <ul id="fileList" class="file-list"></ul>
+          </section>
+
+          <section class="list-panel" aria-labelledby="tracks-title">
+            <div class="section-head">
+              <h2 id="tracks-title">Analyzed Tracks</h2>
+              <span id="trackCount" class="pill">0 tracks</span>
+            </div>
+            <ul id="trackList" class="track-list"></ul>
+          </section>
+        </div>
+
+        <section class="list-panel" aria-labelledby="queue-title">
+          <div class="section-head">
+            <h2 id="queue-title">Live Queue</h2>
+            <span id="queueCount" class="pill">0 queued</span>
+          </div>
+          <ul id="queueList" class="queue-list"></ul>
+        </section>
+
+        <section id="playerPanel" class="player-panel hidden" aria-labelledby="player-title">
+          <div class="section-head">
+            <h2 id="player-title">Mix Player</h2>
+            <a id="downloadLink" class="download-link" href="#" download>Download WAV</a>
+          </div>
+          <div id="liveNow" class="live-now hidden">
+            <span class="live-dot"></span>
+            <span>Live browser mix playing</span>
+          </div>
+          <audio id="mixPlayer" controls preload="metadata"></audio>
+          <dl class="mix-meta">
+            <div>
+              <dt>Mix</dt>
+              <dd id="mixName">-</dd>
+            </div>
+            <div>
+              <dt>Length</dt>
+              <dd id="mixLength">-</dd>
+            </div>
+            <div>
+              <dt>Status</dt>
+              <dd id="mixStatus">-</dd>
+            </div>
+          </dl>
+        </section>
+
+        <section id="errorPanel" class="error-panel hidden" aria-labelledby="errors-title">
+          <div class="section-head">
+            <h2 id="errors-title">Needs Attention</h2>
+          </div>
+          <ul id="errorList"></ul>
+        </section>
+      </section>
+    </main>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>

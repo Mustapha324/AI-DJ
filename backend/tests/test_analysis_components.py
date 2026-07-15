@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import json
+import warnings
+from pathlib import Path
 
 import numpy as np
 
 from app.analyzer.energy_analyzer import normalize_energy_values
 from app.analyzer.key_detector import PITCH_CLASSES, estimate_key
+from app.analyzer.track_analyzer import TrackAnalyzer
 from app.config import Settings
 from app.models.track import BeatInfo, KeyEstimate, TrackAnalysis
 from app.services.track_service import TrackService
@@ -61,3 +64,21 @@ def test_key_estimation_output_format():
     assert key.display_name == f"{key.root} {key.mode}"
     assert 0 <= key.confidence <= 1
     assert set(chroma_features) == set(PITCH_CLASSES)
+
+
+def test_optional_decoder_metadata_warning_is_nonfatal(monkeypatch):
+    sample_rate = 22_050
+    duration_seconds = 2.0
+    time = np.linspace(0, duration_seconds, int(sample_rate * duration_seconds), endpoint=False)
+    audio = 0.5 * np.sin(2 * np.pi * 440 * time)
+
+    def fake_load(path, sr=None, mono=True):
+        warnings.warn("No comment text / valid description?", UserWarning)
+        return audio, sample_rate
+
+    monkeypatch.setattr("app.analyzer.track_analyzer.librosa.load", fake_load)
+
+    analysis = TrackAnalyzer().analyze(Path("metadata-warning.mp3"), "b" * 32, "metadata-warning.mp3")
+
+    assert analysis.track_id == "b" * 32
+    assert analysis.title == "metadata warning"

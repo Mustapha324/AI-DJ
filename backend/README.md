@@ -1,200 +1,245 @@
-# AI DJ Track Analyzer
+# AI DJ Backend
 
-This project is the first foundation milestone for an AI DJ application. The current backend accepts one local WAV or MP3 file, analyzes core musical/audio features, saves the result as JSON, and lets you retrieve previous analyses.
+This backend analyzes uploaded tracks, compares musical compatibility, creates a deterministic DJ mix plan, and renders a playable WAV mix with beat-aware crossfades.
 
-It does not mix songs, play audio in real time, separate stems, detect verses/choruses/drops, or call any LLM API yet.
+The original single-track analysis endpoint is still supported.
 
-## Current Milestone
+## Current MVP
 
 - FastAPI backend
-- Local upload handling for WAV and MP3 files
-- JSON storage for track analysis
-- Beat, tempo, energy, loudness, chroma, and basic key estimation
-- Placeholder section structures for future song arrangement features
-- Tests that generate synthetic WAV audio
+- Easy Mode browser interface at `/`
+- Advanced Mode Swagger documentation at `/docs`
+- Search for already analyzed tracks by title, file name, BPM, or key
+- Single WAV/MP3 analysis through `POST /api/tracks/analyze`
+- Batch MP3 analysis through `POST /api/tracks/analyze-batch`
+- Duplicate upload detection using content hashes
+- JSON storage for track analysis, mix records, and job status
+- Compatibility scoring by tempo, key, energy, and structure
+- Automatic mix planning for two or more tracks with an optional genre/vibe direction
+- Browser-side live deck with a draggable queue, Play Next, Transition Now, and Stop Live controls
+- Excerpt-based mixing so long songs or full DJ sets do not have to play end to end
+- Real WAV rendering with phrase-aware cue points, bass-swap crossfades, gain normalization, fade-in/fade-out, and clipping prevention
+- Procedural transition SFX such as sweeps and downbeat impacts
+- Mix audio streaming through `GET /api/mixes/{mix_id}/audio`
 
 ## Folder Structure
 
 ```text
-ai-dj/
-|-- backend/
-|   |-- app/
-|   |   |-- main.py
-|   |   |-- config.py
-|   |   |-- api/
-|   |   |   `-- tracks.py
-|   |   |-- analyzer/
-|   |   |   |-- track_analyzer.py
-|   |   |   |-- beat_detector.py
-|   |   |   |-- key_detector.py
-|   |   |   `-- energy_analyzer.py
-|   |   |-- models/
-|   |   |   `-- track.py
-|   |   |-- services/
-|   |   |   `-- track_service.py
-|   |   `-- storage/
-|   |-- uploads/
-|   |-- analysis_output/
-|   |-- tests/
-|   |-- requirements.txt
-|   `-- README.md
-|-- music/
-|-- output/
-`-- .gitignore
+backend/
+|-- app/
+|   |-- api/
+|   |   |-- jobs.py
+|   |   |-- mixes.py
+|   |   `-- tracks.py
+|   |-- analyzer/
+|   |-- models/
+|   |   |-- job.py
+|   |   |-- mix.py
+|   |   `-- track.py
+|   |-- services/
+|   |   |-- batch_analyzer.py
+|   |   |-- compatibility.py
+|   |   |-- job_service.py
+|   |   |-- mix_planner.py
+|   |   |-- mix_renderer.py
+|   |   |-- mix_storage.py
+|   |   `-- track_service.py
+|   |-- static/
+|   |   |-- app.js
+|   |   |-- index.html
+|   |   `-- styles.css
+|   |-- config.py
+|   `-- main.py
+|-- uploads/
+|-- analysis_output/
+|-- mixes/
+|-- jobs/
+|-- tests/
+|-- requirements.txt
+`-- README.md
 ```
 
-`backend/uploads`, `backend/analysis_output`, `music`, and `output` are local working folders. Their generated contents are ignored by Git.
+Generated files in `uploads`, `analysis_output`, `mixes`, and `jobs` are local working files and are ignored by Git.
 
-## Windows Setup
+## Setup
 
-From PowerShell, move into the repository:
+From PowerShell:
 
 ```powershell
 cd C:\Users\musta\OneDrive\Documents\GitHub\AI-DJ
-```
-
-Create and activate a virtual environment:
-
-```powershell
 py -3.11 -m venv .venv
 .\.venv\Scripts\Activate.ps1
-```
-
-Install dependencies:
-
-```powershell
 python -m pip install --upgrade pip
 python -m pip install -r backend\requirements.txt
 ```
 
-## Start FastAPI
+No new Python dependency is required for this MVP beyond the existing `requirements.txt`. The first renderer exports WAV files using `librosa`, `numpy`, and `soundfile`.
 
-Run the backend from the `backend` folder:
+## Configuration
+
+Optional environment variables:
+
+```powershell
+$env:AI_DJ_MAX_BATCH_FILES="25"
+$env:AI_DJ_MAX_UPLOAD_MB="100"
+$env:AI_DJ_RENDER_SAMPLE_RATE="44100"
+$env:AI_DJ_UPLOADS_DIR="C:\Path\To\uploads"
+$env:AI_DJ_ANALYSIS_OUTPUT_DIR="C:\Path\To\analysis_output"
+$env:AI_DJ_MIXES_DIR="C:\Path\To\mixes"
+$env:AI_DJ_JOBS_DIR="C:\Path\To\jobs"
+```
+
+## Run The Backend
 
 ```powershell
 cd C:\Users\musta\OneDrive\Documents\GitHub\AI-DJ\backend
-python -m uvicorn app.main:app --reload
+..\.venv\Scripts\python.exe -m uvicorn app.main:app --reload
 ```
 
-Open Swagger documentation:
+Open Easy Mode:
+
+```text
+http://127.0.0.1:8000/
+```
+
+Open Advanced Mode:
 
 ```text
 http://127.0.0.1:8000/docs
 ```
 
-## Analyze A Song
+## Easy Mode
 
-Use Swagger at `/docs`, open `POST /api/tracks/analyze`, choose a WAV or MP3 file that you have permission to use, and execute the request.
+1. Open `http://127.0.0.1:8000/`.
+2. Search saved tracks with **Search Music**, or click **Show Library** to list analyzed tracks.
+3. Add saved tracks to the mix, or drop MP3 files onto the page, choose multiple MP3s, or use **Choose Folder**.
+4. Optional: type a direction such as `smooth house`, `club energy`, `more hip-hop cuts`, or `chill lounge`.
+5. Use the **Live Queue** to drag songs into order.
+6. Click **Play Next** on a queued song to put it after the currently playing track.
+7. Set **Sec/song** to control how much of each track plays before transitioning.
+8. Set **Blend** to control crossfade length.
+9. Keep **Auto order** on for rendered mixes unless you want the selected order.
+10. Keep **DJ transition SFX** on for sweeps and downbeat impacts.
+11. Click **Make Live Mix** to start browser-side playback after local decoding. Use **Transition Now** to force the next blend.
+12. Click **Render Download** when you only want the final WAV output.
 
-You can also use PowerShell with `curl.exe`:
+Folder selection uses browser folder-upload support. Dragging a whole folder also works in browsers that expose dropped folder entries, such as current Chromium-based browsers.
 
-```powershell
-curl.exe -X POST "http://127.0.0.1:8000/api/tracks/analyze" -F "file=@C:\Path\To\Your\Song.wav"
+Online song search is not wired to a commercial music provider yet. To search full online catalogs legally, connect a licensed provider such as a store, streaming, or royalty-free catalog API and render only audio that the app is authorized to access.
+
+Full DJ mixes can be used as source/reference audio, but the app does not retrain an AI model from them yet. The next practical step is a style-profile analyzer that extracts transition spacing, average excerpt length, energy arc, and SFX density from reference DJ sets.
+
+## Swagger: Upload Multiple Songs
+
+1. Open `POST /api/tracks/analyze-batch`.
+2. Click **Try it out**.
+3. In the `files` field, select multiple `.mp3` files.
+4. Click **Execute**.
+5. Check the response:
+   - `successful` shows analyzed tracks.
+   - `failed` shows files that could not be analyzed.
+   - `duplicates` shows files that matched an already analyzed upload.
+   - `tracks[*].track_id` contains the IDs used for compatibility and mixing.
+6. Optional: open `GET /api/jobs/{job_id}` using the returned `job_id`.
+
+The batch endpoint continues after individual file failures. Broken files should appear in `errors` instead of crashing the whole request.
+
+## Swagger: Find Compatible Tracks
+
+1. Copy a `track_id` from a batch or single upload response.
+2. Open `GET /api/tracks/{track_id}/compatible`.
+3. Click **Try it out**.
+4. Paste the track ID.
+5. Click **Execute**.
+
+The response is ordered from best match to weakest match and includes a score breakdown for tempo, key, energy, and structure.
+
+## Swagger: Search Saved Tracks
+
+Use:
+
+```text
+GET /api/tracks/search?query=alpha
 ```
 
-List analyzed tracks:
+This searches tracks that have already been analyzed and saved locally.
 
-```powershell
-Invoke-RestMethod -Uri "http://127.0.0.1:8000/api/tracks" -Method Get
+## Swagger: Create And Render A Mix
+
+Create a plan first:
+
+1. Open `POST /api/mixes/plan`.
+2. Click **Try it out**.
+3. Use a request like:
+
+```json
+{
+  "track_ids": ["TRACK_ID_1", "TRACK_ID_2", "TRACK_ID_3"],
+  "mix_name": "First AI Mix",
+  "transition_bars": 8,
+  "target_duration_minutes": 10,
+  "max_play_seconds_per_track": 75,
+  "auto_order": true,
+  "mix_direction": "smooth house with club energy",
+  "use_transition_sfx": true
+}
 ```
 
-Get one analysis:
+4. Click **Execute**.
+5. Copy the returned `mix_id`.
 
-```powershell
-Invoke-RestMethod -Uri "http://127.0.0.1:8000/api/tracks/TRACK_ID_HERE" -Method Get
+Render the audio:
+
+1. Open `POST /api/mixes/render`.
+2. Click **Try it out**.
+3. Use:
+
+```json
+{
+  "mix_id": "MIX_ID_HERE",
+  "output_format": "wav"
+}
 ```
+
+4. Click **Execute**.
+5. Confirm the response status is `completed` and `output_filename` ends in `.wav`.
+
+Play or download the rendered mix:
+
+1. Open `GET /api/mixes/{mix_id}/audio`.
+2. Paste the same `mix_id`.
+3. Click **Execute**.
+
+You can also inspect saved mix records with:
+
+- `GET /api/mixes`
+- `GET /api/mixes/{mix_id}`
 
 ## Run Tests
 
 From the `backend` folder:
 
 ```powershell
-python -m pytest
+..\.venv\Scripts\python.exe -m pytest
 ```
 
-The tests generate a short synthetic WAV signal and do not require copyrighted music.
-
-## Example JSON Response
-
-```json
-{
-  "track_id": "2fb88dc5c3cc4dbb9d89ce1f6ef75631",
-  "file_name": "my_song.wav",
-  "title": "my song",
-  "duration_seconds": 184.32,
-  "sample_rate": 44100,
-  "estimated_bpm": 124.0,
-  "beats": {
-    "tempo_bpm": 124.0,
-    "beat_timestamps": [0.47, 0.95, 1.43],
-    "beat_count": 382,
-    "approximate_bars": [
-      {
-        "bar_number": 1,
-        "start_beat": 1,
-        "end_beat": 4,
-        "start_time": 0.47,
-        "end_time": 1.91
-      }
-    ]
-  },
-  "key": {
-    "root": "A",
-    "mode": "minor",
-    "display_name": "A minor",
-    "confidence": 0.72
-  },
-  "overall_rms_energy": 0.18,
-  "energy_curve": [
-    { "time": 1.0, "energy": 0.54 },
-    { "time": 2.0, "energy": 0.61 }
-  ],
-  "estimated_loudness_db": -14.89,
-  "zero_crossing_rate": 0.057,
-  "spectral_centroid": 2350.42,
-  "chroma_features": {
-    "C": 0.04,
-    "C#": 0.02,
-    "D": 0.06,
-    "D#": 0.03,
-    "E": 0.11,
-    "F": 0.02,
-    "F#": 0.04,
-    "G": 0.05,
-    "G#": 0.07,
-    "A": 0.28,
-    "A#": 0.04,
-    "B": 0.24
-  },
-  "sections": [
-    {
-      "section_type": "unknown",
-      "start_time": 0.0,
-      "end_time": 184.32,
-      "start_beat": 1,
-      "end_beat": 382,
-      "energy": 0.57,
-      "confidence": 0.25,
-      "manually_labeled": false
-    }
-  ],
-  "possible_high_energy_sections": [],
-  "possible_low_energy_sections": []
-}
-```
-
-## Key Estimate Limitation
-
-The key detector uses chroma features and major/minor key profiles. This is a basic estimate and may be wrong, especially for tracks with modulation, unusual tuning, dense percussion, short clips, or ambiguous harmony.
+The tests generate synthetic audio and do not require copyrighted music.
 
 ## Known Limitations
 
-- Section labels are only `unknown`, `high_energy`, or `low_energy` for now.
-- Beat tracking and BPM are estimates.
-- Loudness is an approximate dB value based on RMS energy, not a full LUFS measurement.
-- MP3 decoding depends on the local audio backend available to `librosa`.
-- Storage is JSON files, not a database.
+- Batch upload intentionally accepts `.mp3` files only for now.
+- The renderer currently exports WAV only. MP3 export should be added with FFmpeg or a configured encoder.
+- Easy Mode's "Live Mix" starts browser-side playback from selected files or saved tracks after local audio decoding. The final downloadable render still happens on the backend.
+- The live deck plays excerpts by default. Very long MP3s still need to be decoded by the browser before live playback starts.
+- Online song search requires a licensed provider integration before full external songs can be selected without local files.
+- Reference DJ mixes are not true model training yet; they can be analyzed in a future style-profile workflow.
+- The mix direction steers ordering, transition length, and SFX style. It does not transform the source songs into a new genre.
+- Rendering runs in-process in this MVP. Job records exist, but Redis/Celery/RQ are not wired in yet.
+- Beat tracking, key detection, and section labels are estimates.
+- BPM matching is conservative and only stretches within a safe range.
+- The mix planner uses deterministic rules, not machine learning.
+- The renderer uses mono audio internally for reliability in this first pass.
 
-## Planned Next Milestone
+## Recommended Next Step
 
-Add manual section labeling and editing so a user can correct intro, verse, chorus, drop, and outro boundaries before any automatic mixing work begins.
+Add a reference-mix style profiler for full DJ sets, then add waveform previews and editable transition points in Easy Mode. After that, add FFmpeg-backed MP3 export and move long analysis/render work into a real background queue.

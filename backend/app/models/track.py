@@ -78,6 +78,8 @@ class TrackAnalysis(BaseModel):
     sections: list[TrackSection] = Field(default_factory=list)
     possible_high_energy_sections: list[TrackSection] = Field(default_factory=list)
     possible_low_energy_sections: list[TrackSection] = Field(default_factory=list)
+    content_hash: str | None = None
+    file_size_bytes: int | None = Field(default=None, ge=0)
 
 
 class TrackSummary(BaseModel):
@@ -87,3 +89,46 @@ class TrackSummary(BaseModel):
     duration_seconds: float
     estimated_bpm: float | None
     key: KeyEstimate
+    beat_count: int = 0
+    approximate_bar_count: int = 0
+    overall_rms_energy: float = 0.0
+
+
+BatchTrackStatus = Literal["analyzed", "duplicate"]
+
+
+class BatchTrackResult(BaseModel):
+    track_id: str
+    file_name: str
+    status: BatchTrackStatus
+
+
+class BatchTrackError(BaseModel):
+    file_name: str
+    error: str
+
+
+class BatchAnalyzeResponse(BaseModel):
+    total_files: int
+    successful: int
+    failed: int
+    duplicates: int
+    tracks: list[BatchTrackResult]
+    errors: list[BatchTrackError]
+    job_id: str | None = None
+
+
+class CompatibilityBreakdown(BaseModel):
+    tempo: float = Field(..., ge=0, le=1)
+    key: float = Field(..., ge=0, le=1)
+    energy: float = Field(..., ge=0, le=1)
+    structure: float = Field(..., ge=0, le=1)
+
+
+class TrackCompatibility(BaseModel):
+    source_track_id: str
+    target_track_id: str
+    target_title: str
+    target_file_name: str
+    compatibility_score: float = Field(..., ge=0, le=1)
+    score_breakdown: CompatibilityBreakdown
