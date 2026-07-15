@@ -4,7 +4,7 @@ from fastapi.responses import FileResponse
 from app.analyzer.track_analyzer import AudioAnalysisError, TrackAnalyzer
 from app.api.jobs import get_job_service
 from app.config import settings
-from app.models.track import BatchAnalyzeResponse, TrackAnalysis, TrackCompatibility, TrackSummary
+from app.models.track import BatchAnalyzeResponse, TrackAnalysis, TrackCompatibility, TrackImportUrlRequest, TrackSummary
 from app.services.batch_analyzer import BatchAnalyzer, BatchLimitError
 from app.services.compatibility import CompatibilityService
 from app.services.job_service import JobService
@@ -66,6 +66,44 @@ async def analyze_track_batch(
     except BatchLimitError as exc:
         job_service.update_job(job.job_id, status="failed", progress=100, message="Batch analysis failed.", error=str(exc))
         raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=str(exc)) from exc
+
+
+@router.post("/import-url", response_model=TrackAnalysis, status_code=status.HTTP_201_CREATED)
+async def import_track_from_url(
+    request: TrackImportUrlRequest,
+    track_service: TrackService = Depends(get_track_service),
+    track_analyzer: TrackAnalyzer = Depends(get_track_analyzer),
+) -> TrackAnalysis:
+    saved_upload = None
+    try:
+        track_id = track_service.generate_track_id()
+        saved_upload = await track_service.save_remote_audio_for_analysis(
+            request.url,
+            track_id,
+            file_name=request.file_name,
+        )
+        duplicate = track_service.find_duplicate_by_hash(saved_upload.content_hash)
+        if duplicate:
+            saved_upload.path.unlink(missing_ok=True)
+            return duplicate
+
+        analysis = track_analyzer.analyze(
+            saved_upload.path,
+            track_id=track_id,
+            original_file_name=saved_upload.safe_file_name,
+        )
+        analysis.content_hash = saved_upload.content_hash
+        analysis.file_size_bytes = saved_upload.size_bytes
+        track_service.save_analysis(analysis)
+        return analysis
+    except InvalidAudioFileError as exc:
+        if saved_upload:
+            saved_upload.path.unlink(missing_ok=True)
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except AudioAnalysisError as exc:
+        if saved_upload:
+            saved_upload.path.unlink(missing_ok=True)
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
 
 
 @router.get("", response_model=list[TrackSummary])

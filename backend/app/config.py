@@ -35,6 +35,9 @@ class Settings:
     )
     mixes_dir: Path = field(default_factory=lambda: _path_from_env("AI_DJ_MIXES_DIR", BACKEND_DIR / "mixes"))
     jobs_dir: Path = field(default_factory=lambda: _path_from_env("AI_DJ_JOBS_DIR", BACKEND_DIR / "jobs"))
+    style_profiles_dir: Path = field(
+        default_factory=lambda: _path_from_env("AI_DJ_STYLE_PROFILES_DIR", BACKEND_DIR / "style_profiles")
+    )
     allowed_audio_extensions: tuple[str, ...] = (".wav", ".mp3")
     batch_audio_extensions: tuple[str, ...] = (".mp3",)
     allowed_content_types: set[str] = field(
@@ -60,3 +63,4 @@ def ensure_storage_dirs(current_settings: Settings = settings) -> None:
     current_settings.analysis_output_dir.mkdir(parents=True, exist_ok=True)
     current_settings.mixes_dir.mkdir(parents=True, exist_ok=True)
     current_settings.jobs_dir.mkdir(parents=True, exist_ok=True)
+    current_settings.style_profiles_dir.mkdir(parents=True, exist_ok=True)

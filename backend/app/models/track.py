@@ -94,6 +94,11 @@ class TrackSummary(BaseModel):
     overall_rms_energy: float = 0.0
 
 
+class TrackImportUrlRequest(BaseModel):
+    url: str = Field(..., min_length=8, max_length=2048)
+    file_name: str | None = Field(default=None, max_length=160)
+
+
 BatchTrackStatus = Literal["analyzed", "duplicate"]
 
 

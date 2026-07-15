@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import FileResponse
 
 from app.api.jobs import get_job_service
+from app.api.style_profiles import get_style_profile_service
 from app.api.tracks import get_track_service
 from app.config import settings
 from app.models.mix import MixPlan, MixPlanRequest, MixRecord, MixSummary, RenderMixRequest
@@ -14,6 +15,7 @@ from app.services.job_service import JobService
 from app.services.mix_planner import MixPlanner, MixPlanningError
 from app.services.mix_renderer import MixRenderer, MixRenderError
 from app.services.mix_storage import MixNotFoundError, MixStorage
+from app.services.style_profile_service import StyleProfileService
 from app.services.track_service import TrackNotFoundError, TrackService
 
 
@@ -24,8 +26,10 @@ def get_mix_storage() -> MixStorage:
     return MixStorage(settings)
 
 
-def get_mix_planner() -> MixPlanner:
-    return MixPlanner(CompatibilityService())
+def get_mix_planner(
+    style_service: StyleProfileService = Depends(get_style_profile_service),
+) -> MixPlanner:
+    return MixPlanner(CompatibilityService(), style_service.get_default_profile())
 
 
 @router.post("/plan", response_model=MixPlan, status_code=status.HTTP_201_CREATED)

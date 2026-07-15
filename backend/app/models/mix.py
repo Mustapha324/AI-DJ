@@ -36,6 +36,7 @@ class MixPlanRequest(BaseModel):
     auto_order: bool = True
     mix_direction: str | None = Field(default=None, max_length=240)
     use_transition_sfx: bool = True
+    use_trained_style: bool = True
 
     @field_validator("mix_direction")
     @classmethod

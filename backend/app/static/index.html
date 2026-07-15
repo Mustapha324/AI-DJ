@@ -39,6 +39,34 @@
           <ul id="catalogResults" class="catalog-results"></ul>
         </section>
 
+        <section class="catalog-panel" aria-labelledby="training-title">
+          <div class="section-head">
+            <h2 id="training-title">DJ Style Training</h2>
+            <span id="styleStatus" class="pill">No profile</span>
+          </div>
+          <input id="referenceInput" class="hidden-input" type="file" accept=".mp3,.wav,audio/mpeg,audio/wav" multiple />
+          <div class="file-actions">
+            <button id="chooseReferenceButton" type="button">Choose DJ Reference Mixes</button>
+            <button id="trainStyleButton" type="button" class="secondary" disabled>Train Style</button>
+          </div>
+          <ul id="referenceList" class="catalog-results"></ul>
+        </section>
+
+        <section class="catalog-panel" aria-labelledby="import-title">
+          <div class="section-head">
+            <h2 id="import-title">Import Audio Link</h2>
+          </div>
+          <div class="search-row">
+            <input
+              id="audioUrlInput"
+              type="url"
+              maxlength="2048"
+              placeholder="Paste direct MP3/WAV link"
+            />
+            <button id="importUrlButton" type="button">Import</button>
+          </div>
+        </section>
+
         <div id="dropZone" class="drop-zone" tabindex="0">
           <input id="fileInput" class="hidden-input" type="file" accept=".mp3,audio/mpeg" multiple />
           <input
@@ -76,6 +104,10 @@
           <label class="check-option">
             <input id="useSfx" type="checkbox" checked />
             <span>DJ transition SFX</span>
+          </label>
+          <label class="check-option">
+            <input id="useTrainedStyle" type="checkbox" checked />
+            <span>Use trained style</span>
           </label>
           <label class="small-field">
             <span>Minutes</span>

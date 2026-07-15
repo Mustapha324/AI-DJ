@@ -199,13 +199,133 @@ def _add_transition_sfx(overlap: np.ndarray, sample_rate: int, sfx_names: list[s
         return overlap
 
     effected = overlap.copy()
-    if "noise_sweep" in sfx_names:
-        effected += _noise_sweep(len(overlap), sample_rate, amplitude=0.035)
+    if "filter_sweep" in sfx_names:
+        effected = _add_filter_sweep(effected, sample_rate)
+    if "echo_tail" in sfx_names:
+        effected = _add_echo_tail(effected, sample_rate)
+    if "reverb_riser" in sfx_names:
+        effected += _reverb_riser(len(overlap), sample_rate, amplitude=0.022)
+    if "reverse_swell" in sfx_names:
+        effected += _reverse_swell(len(overlap), sample_rate, amplitude=0.024)
+    if "loop_roll" in sfx_names:
+        effected = _add_loop_roll(effected, sample_rate)
+    if "echo_freeze" in sfx_names:
+        effected = _add_echo_freeze(effected, sample_rate)
+    if "brake_cut" in sfx_names:
+        effected = _add_brake_cut(effected, sample_rate)
+    if "noise_sweep" in sfx_names or "filter_sweep" in sfx_names:
+        effected += _noise_sweep(len(overlap), sample_rate, amplitude=0.016)
     if "soft_sweep" in sfx_names:
-        effected += _noise_sweep(len(overlap), sample_rate, amplitude=0.018)
+        effected += _noise_sweep(len(overlap), sample_rate, amplitude=0.011)
     if "impact" in sfx_names:
         effected = _add_downbeat_impact(effected, sample_rate)
-    return effected.astype(np.float32)
+    return _prevent_clipping(effected.astype(np.float32))
+
+
+def _add_filter_sweep(audio: np.ndarray, sample_rate: int) -> np.ndarray:
+    if audio.size == 0:
+        return audio
+    low, high = _split_low_high(audio, sample_rate)
+    progress = np.linspace(0.0, 1.0, len(audio), dtype=np.float32)
+    low_curve = np.clip(1.0 - (0.2 * progress), 0.78, 1.0)
+    high_curve = 0.9 + (0.18 * np.sin(np.pi * progress))
+    swept = (low * low_curve) + (high * high_curve)
+    return ((audio * 0.65) + (swept * 0.35)).astype(np.float32)
+
+
+def _add_echo_tail(audio: np.ndarray, sample_rate: int) -> np.ndarray:
+    if audio.size == 0:
+        return audio
+    delay = max(1, int(sample_rate * 0.18))
+    wet = np.zeros_like(audio, dtype=np.float32)
+    for tap in range(1, 5):
+        offset = delay * tap
+        if offset >= len(audio):
+            break
+        wet[offset:] += audio[:-offset] * (0.42 ** tap)
+    envelope = np.linspace(0.0, 1.0, len(audio), dtype=np.float32) ** 1.7
+    return (audio + (wet * envelope * 0.22)).astype(np.float32)
+
+
+def _reverb_riser(length: int, sample_rate: int, amplitude: float) -> np.ndarray:
+    if length <= 0:
+        return np.asarray([], dtype=np.float32)
+    progress = np.linspace(0.0, 1.0, length, dtype=np.float32)
+    t = np.arange(length, dtype=np.float32) / sample_rate
+    frequency = 520.0 + (3100.0 * (progress**1.4))
+    phase = 2.0 * np.pi * np.cumsum(frequency) / sample_rate
+    tone = np.sin(phase).astype(np.float32)
+    texture = np.random.default_rng(24680).normal(0.0, 1.0, length).astype(np.float32)
+    envelope = np.clip(progress**1.8, 0.0, 1.0) * np.sin(np.pi * progress)
+    return ((tone * 0.35 + texture * 0.65) * envelope * amplitude).astype(np.float32)
+
+
+def _reverse_swell(length: int, sample_rate: int, amplitude: float) -> np.ndarray:
+    if length <= 0:
+        return np.asarray([], dtype=np.float32)
+    progress = np.linspace(0.0, 1.0, length, dtype=np.float32)
+    t = np.arange(length, dtype=np.float32) / sample_rate
+    tone = np.sin(2.0 * np.pi * (360.0 + 900.0 * progress) * t).astype(np.float32)
+    noise = np.random.default_rng(97531).normal(0.0, 1.0, length).astype(np.float32)
+    envelope = np.clip(progress**2.2, 0.0, 1.0)
+    return ((tone * 0.18 + noise * 0.82) * envelope * amplitude).astype(np.float32)
+
+
+def _add_loop_roll(audio: np.ndarray, sample_rate: int) -> np.ndarray:
+    if audio.size < sample_rate * 0.3:
+        return audio
+    rolled = audio.copy()
+    step = max(1, int(sample_rate * 0.125))
+    start = int(len(audio) * 0.68)
+    source_start = max(0, start - step)
+    snippet = audio[source_start : source_start + step]
+    if snippet.size == 0:
+        return audio
+    for position in range(start, len(audio), step):
+        width = min(step, len(audio) - position, len(snippet))
+        if width <= 0:
+            break
+        local_progress = (position - start) / max(len(audio) - start, 1)
+        amount = min(0.42, 0.18 + (local_progress * 0.28))
+        rolled[position : position + width] = (rolled[position : position + width] * (1.0 - amount)) + (
+            snippet[:width] * amount
+        )
+    return rolled.astype(np.float32)
+
+
+def _add_echo_freeze(audio: np.ndarray, sample_rate: int) -> np.ndarray:
+    if audio.size < sample_rate * 0.35:
+        return audio
+    frozen = audio.copy()
+    snippet_length = max(1, int(sample_rate * 0.16))
+    start = max(0, int(len(audio) * 0.74) - snippet_length)
+    snippet = audio[start : start + snippet_length]
+    if snippet.size == 0:
+        return audio
+    tail_start = int(len(audio) * 0.74)
+    for position in range(tail_start, len(audio), snippet_length):
+        width = min(snippet_length, len(audio) - position, len(snippet))
+        if width <= 0:
+            break
+        progress = (position - tail_start) / max(len(audio) - tail_start, 1)
+        amount = 0.16 + (0.24 * progress)
+        frozen[position : position + width] = (frozen[position : position + width] * (1.0 - amount)) + (
+            snippet[:width] * amount
+        )
+    return frozen.astype(np.float32)
+
+
+def _add_brake_cut(audio: np.ndarray, sample_rate: int) -> np.ndarray:
+    if audio.size < sample_rate * 0.25:
+        return audio
+    braked = audio.copy()
+    start = int(len(audio) * 0.86)
+    tail = braked[start:]
+    if tail.size == 0:
+        return audio
+    progress = np.linspace(0.0, 1.0, len(tail), dtype=np.float32)
+    braked[start:] = tail * (1.0 - progress) ** 1.8
+    return braked.astype(np.float32)
 
 
 def _noise_sweep(length: int, sample_rate: int, amplitude: float) -> np.ndarray:

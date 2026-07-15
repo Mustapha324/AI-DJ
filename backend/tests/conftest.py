@@ -20,6 +20,7 @@ def test_settings(tmp_path):
         analysis_output_dir=tmp_path / "analysis_output",
         mixes_dir=tmp_path / "mixes",
         jobs_dir=tmp_path / "jobs",
+        style_profiles_dir=tmp_path / "style_profiles",
         max_upload_size_bytes=10 * 1024 * 1024,
     )
 
@@ -28,6 +29,7 @@ def test_settings(tmp_path):
 def client(test_settings):
     from app.api.jobs import get_job_service
     from app.api.mixes import get_mix_storage
+    from app.api.style_profiles import get_style_profile_service
 
     def override_track_service() -> TrackService:
         return TrackService(test_settings)
@@ -42,9 +44,15 @@ def client(test_settings):
 
         return MixStorage(test_settings)
 
+    def override_style_profile_service():
+        from app.services.style_profile_service import StyleProfileService
+
+        return StyleProfileService(test_settings)
+
     app.dependency_overrides[get_track_service] = override_track_service
     app.dependency_overrides[get_job_service] = override_job_service
     app.dependency_overrides[get_mix_storage] = override_mix_storage
+    app.dependency_overrides[get_style_profile_service] = override_style_profile_service
     with TestClient(app) as test_client:
         yield test_client
     app.dependency_overrides.clear()
@@ -83,3 +91,8 @@ def synthetic_mp3_named_uploads(make_synthetic_wav_bytes) -> list[tuple[str, byt
         ("bravo.mp3", make_synthetic_wav_bytes(440.0), "audio/mpeg"),
         ("charlie.mp3", make_synthetic_wav_bytes(550.0), "audio/mpeg"),
     ]
+
+
+@pytest.fixture()
+def synthetic_reference_mix_bytes(make_synthetic_wav_bytes) -> bytes:
+    return make_synthetic_wav_bytes(440.0, duration_seconds=18.0, pulse_period=0.48)

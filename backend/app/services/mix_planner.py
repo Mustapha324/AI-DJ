@@ -4,6 +4,7 @@ import math
 from datetime import datetime, timezone
 
 from app.models.mix import MixableTrack, MixPlan, MixPlanRequest, MixTrackPlacement, MixTransition
+from app.models.style_profile import DJStyleProfile
 from app.models.track import TrackAnalysis
 from app.services.compatibility import CompatibilityService
 
@@ -13,8 +14,13 @@ class MixPlanningError(Exception):
 
 
 class MixPlanner:
-    def __init__(self, compatibility_service: CompatibilityService | None = None) -> None:
+    def __init__(
+        self,
+        compatibility_service: CompatibilityService | None = None,
+        style_profile: DJStyleProfile | None = None,
+    ) -> None:
         self.compatibility_service = compatibility_service or CompatibilityService()
+        self.style_profile = style_profile
 
     def create_plan(
         self,
@@ -39,16 +45,23 @@ class MixPlanner:
 
         target_seconds = request.target_duration_minutes * 60 if request.target_duration_minutes else None
         target_limit = (target_seconds / len(tracks)) if target_seconds else None
-        per_track_limit = _per_track_limit(target_limit, request.max_play_seconds_per_track)
+        profile_max_play = self.style_profile.max_play_seconds_per_track if request.use_trained_style and self.style_profile else None
+        requested_max_play = request.max_play_seconds_per_track or profile_max_play
+        per_track_limit = _per_track_limit(target_limit, requested_max_play)
 
         placements: list[MixTrackPlacement] = []
         transitions: list[MixTransition] = []
         timeline_start = 0.0
 
-        transition_bars = _direction_adjusted_transition_bars(request.transition_bars, request.mix_direction)
-        transition_sfx = _sfx_for_direction(request.mix_direction, request.use_transition_sfx)
+        requested_transition_bars = (
+            self.style_profile.default_transition_bars
+            if request.use_trained_style and self.style_profile and request.transition_bars == 8
+            else request.transition_bars
+        )
+        transition_bars = _direction_adjusted_transition_bars(requested_transition_bars, request.mix_direction)
+        active_style_profile = self.style_profile if request.use_trained_style else None
 
-        source_starts = [0.0] + [_choose_track_start(track) for track in tracks[1:]]
+        source_starts = [0.0] + [_choose_track_start(track, active_style_profile) for track in tracks[1:]]
 
         for index, track in enumerate(tracks):
             source_start = source_starts[index]
@@ -57,8 +70,13 @@ class MixPlanner:
 
             if index < len(tracks) - 1:
                 next_track = tracks[index + 1]
-                transition_duration = _transition_duration_seconds(track, next_track, transition_bars)
-                source_end = _choose_transition_end(track, source_start, source_end, transition_duration)
+                transition_duration = _transition_duration_seconds(
+                    track,
+                    next_track,
+                    transition_bars,
+                    self.style_profile if request.use_trained_style else None,
+                )
+                source_end = _choose_transition_end(track, source_start, source_end, transition_duration, active_style_profile)
 
             timeline_end = round(timeline_start + max(0.0, source_end - source_start), 3)
             placements.append(
@@ -101,7 +119,14 @@ class MixPlanner:
                         crossfade_curve="equal_power",
                         transition_type="crossfade",
                         compatibility_score=compatibility.compatibility_score,
-                        sfx=transition_sfx,
+                        sfx=_sfx_for_transition(
+                            track,
+                            next_track,
+                            request.mix_direction,
+                            request.use_transition_sfx,
+                            active_style_profile,
+                            compatibility.compatibility_score,
+                        ),
                     )
                 )
                 timeline_start = round(timeline_end - transition_duration, 3)
@@ -112,7 +137,7 @@ class MixPlanner:
             mix_name=request.mix_name,
             mix_direction=request.mix_direction,
             use_transition_sfx=request.use_transition_sfx,
-            max_play_seconds_per_track=request.max_play_seconds_per_track,
+            max_play_seconds_per_track=per_track_limit,
             track_order=[track.track_id for track in tracks],
             placements=placements,
             transitions=transitions,
@@ -154,9 +179,18 @@ def _to_mixable_track(analysis: TrackAnalysis) -> MixableTrack:
     )
 
 
-def _transition_duration_seconds(source: MixableTrack, target: MixableTrack, transition_bars: int) -> float:
+def _transition_duration_seconds(
+    source: MixableTrack,
+    target: MixableTrack,
+    transition_bars: int,
+    style_profile: DJStyleProfile | None = None,
+) -> float:
     bpm = source.bpm or target.bpm or 120.0
-    requested = transition_bars * 4 * (60.0 / bpm)
+    requested = (
+        style_profile.transition_duration_seconds
+        if style_profile
+        else transition_bars * 4 * (60.0 / bpm)
+    )
     upper_bound = min(source.duration_seconds * 0.4, target.duration_seconds * 0.4, 45.0)
     if upper_bound <= 0:
         return 0.0
@@ -182,28 +216,94 @@ def _direction_adjusted_transition_bars(base_bars: int, mix_direction: str | Non
     return base_bars
 
 
-def _sfx_for_direction(mix_direction: str | None, enabled: bool) -> list[str]:
+def _sfx_for_transition(
+    source: MixableTrack,
+    target: MixableTrack,
+    mix_direction: str | None,
+    enabled: bool,
+    style_profile: DJStyleProfile | None = None,
+    compatibility_score: float = 0.75,
+) -> list[str]:
     if not enabled:
         return []
 
+    if style_profile and style_profile.sfx_density < 0.22:
+        return []
+
+    profile_effects = style_profile.transition_effects if style_profile else []
+    direction_effects = _direction_effect_palette(mix_direction)
+    palette = _unique_effects([*profile_effects, *direction_effects])
+    intensity = style_profile.effect_intensity if style_profile else 0.56
+    energy_delta = abs(source.overall_energy - target.overall_energy) / max(source.overall_energy, target.overall_energy, 1e-9)
+    tempo_delta = abs((source.bpm or 0.0) - (target.bpm or 0.0)) if source.bpm and target.bpm else 0.0
+
+    effects: list[str] = []
     direction = (mix_direction or "").lower()
-    if any(word in direction for word in ("hip hop", "rap", "pop", "quick")):
-        return ["impact"]
+    smooth_direction = any(word in direction for word in ("ambient", "chill", "lounge", "smooth"))
+
+    if "filter_sweep" in palette:
+        effects.append("soft_sweep" if smooth_direction and intensity < 0.5 else "filter_sweep")
+    if "echo_tail" in palette and (intensity >= 0.28 or compatibility_score < 0.82 or tempo_delta >= 4):
+        effects.append("echo_tail")
+    if "echo_freeze" in palette and (compatibility_score < 0.76 or tempo_delta >= 5 or intensity >= 0.6):
+        effects.append("echo_freeze")
+    if "reverb_riser" in palette and (intensity >= 0.48 or energy_delta >= 0.22):
+        effects.append("reverb_riser")
+    if "reverse_swell" in palette and (intensity >= 0.5 or energy_delta >= 0.2):
+        effects.append("reverse_swell")
+    if "loop_roll" in palette and (intensity >= 0.42 or any(word in direction for word in ("hip hop", "rap", "quick", "cut"))):
+        effects.append("loop_roll")
+    if "brake_cut" in palette and not smooth_direction and any(word in direction for word in ("hip hop", "rap", "quick", "cut")):
+        effects.append("brake_cut")
+    if "impact" in palette and not smooth_direction and (intensity >= 0.45 or energy_delta >= 0.18 or compatibility_score < 0.68):
+        effects.append("impact")
+
+    if not effects:
+        return ["soft_sweep"] if smooth_direction else ["filter_sweep"]
+    return _unique_effects(effects)[:5]
+
+
+def _direction_effect_palette(mix_direction: str | None) -> list[str]:
+    direction = (mix_direction or "").lower()
+    if any(word in direction for word in ("hip hop", "rap", "pop", "quick", "cut")):
+        return ["loop_roll", "echo_tail", "echo_freeze", "brake_cut", "impact", "filter_sweep"]
     if any(word in direction for word in ("house", "techno", "edm", "trance", "dance", "club")):
-        return ["noise_sweep", "impact"]
+        return ["filter_sweep", "echo_tail", "reverb_riser", "reverse_swell", "impact"]
     if any(word in direction for word in ("ambient", "chill", "lounge", "smooth")):
-        return ["soft_sweep"]
-    return ["noise_sweep", "impact"]
+        return ["filter_sweep", "echo_tail", "reverb_riser", "reverse_swell"]
+    return ["filter_sweep", "echo_tail", "reverse_swell", "impact"]
 
 
-def _choose_track_start(track: MixableTrack) -> float:
+def _unique_effects(effects: list[str]) -> list[str]:
+    seen: set[str] = set()
+    unique: list[str] = []
+    for effect in effects:
+        if effect in seen:
+            continue
+        seen.add(effect)
+        unique.append(effect)
+    return unique
+
+
+def _choose_track_start(track: MixableTrack, style_profile: DJStyleProfile | None = None) -> float:
+    phrase_bars = style_profile.phrase_bars if style_profile else 4
     bar_candidates = [
         bar.start_time
         for bar in track.approximate_bars
-        if 0.25 <= bar.start_time <= min(24.0, track.duration_seconds * 0.2)
+        if 0.25 <= bar.start_time <= min(36.0, track.duration_seconds * 0.28)
     ]
     if bar_candidates:
-        return round(bar_candidates[0], 3)
+        latest = max(bar_candidates)
+
+        def score(candidate: float) -> float:
+            energy = _energy_at_time(track, candidate)
+            phrase_score = 1.0 if _is_phrase_boundary(track, candidate, phrase_bars) else 0.62
+            energy_score = 1.0 - min(abs(energy - 0.58) / 0.58, 1.0)
+            early_score = 1.0 - min(candidate / max(latest, 1.0), 1.0)
+            change_score = _energy_change_near(track, candidate)
+            return (phrase_score * 0.36) + (energy_score * 0.26) + (early_score * 0.23) + (change_score * 0.15)
+
+        return round(max(bar_candidates, key=score), 3)
 
     beat_candidates = [
         beat_time
@@ -228,9 +328,40 @@ def _choose_transition_end(
     source_start: float,
     current_end: float,
     transition_duration: float,
+    style_profile: DJStyleProfile | None = None,
 ) -> float:
+    phrase_bars = style_profile.phrase_bars if style_profile else 4
+    cue_sensitivity = style_profile.cue_point_sensitivity if style_profile else 0.55
     minimum_end = min(track.duration_seconds, source_start + transition_duration + 1.0)
     latest_end = min(track.duration_seconds, max(current_end, minimum_end))
+    earliest_start = min(latest_end, source_start + max(transition_duration, 8.0))
+    latest_start = max(source_start, latest_end - transition_duration)
+    start_candidates = [
+        bar.start_time
+        for bar in track.approximate_bars
+        if earliest_start <= bar.start_time <= latest_start
+    ]
+
+    if start_candidates:
+        segment_length = max(latest_end - source_start, 1.0)
+
+        def start_score(candidate: float) -> float:
+            energy = _energy_at_time(track, candidate)
+            phrase_weight = 1.0 if _is_phrase_boundary(track, candidate, phrase_bars) else 0.58
+            progress = (candidate - source_start) / segment_length
+            change = _energy_change_near(track, candidate)
+            low_energy = 1.0 - energy
+            return (
+                (phrase_weight * 0.34)
+                + (low_energy * 0.22)
+                + (progress * 0.18)
+                + (change * cue_sensitivity * 0.2)
+                + (_energy_drop_after(track, candidate, transition_duration) * 0.06)
+            )
+
+        best_start = max(start_candidates, key=start_score)
+        return round(min(track.duration_seconds, best_start + transition_duration), 3)
+
     candidates = [
         bar.start_time
         for bar in track.approximate_bars
@@ -244,7 +375,7 @@ def _choose_transition_end(
             transition_start = max(source_start, candidate - transition_duration)
             energy = _energy_at_time(track, transition_start)
             progress = (candidate - source_start) / segment_length
-            phrase_weight = 1.0 if _is_phrase_boundary(track, candidate) else 0.8
+            phrase_weight = 1.0 if _is_phrase_boundary(track, transition_start, phrase_bars) else 0.8
             return ((1.0 - energy) * 0.45) + (progress * 0.4) + (phrase_weight * 0.15)
 
         return round(max(candidates, key=score), 3)
@@ -268,11 +399,27 @@ def _energy_at_time(track: MixableTrack, time_seconds: float) -> float:
     return min(track.energy_curve, key=lambda point: abs(point.time - time_seconds)).energy
 
 
-def _is_phrase_boundary(track: MixableTrack, time_seconds: float) -> bool:
+def _is_phrase_boundary(track: MixableTrack, time_seconds: float, phrase_bars: int = 4) -> bool:
     for bar in track.approximate_bars:
         if abs(bar.start_time - time_seconds) <= 0.05:
-            return (bar.bar_number - 1) % 4 == 0
+            return (bar.bar_number - 1) % max(1, phrase_bars) == 0
     return False
+
+
+def _energy_change_near(track: MixableTrack, time_seconds: float) -> float:
+    if len(track.energy_curve) < 2:
+        return 0.0
+    before = [point.energy for point in track.energy_curve if time_seconds - 4.0 <= point.time <= time_seconds]
+    after = [point.energy for point in track.energy_curve if time_seconds < point.time <= time_seconds + 4.0]
+    if not before or not after:
+        return 0.0
+    return min(1.0, abs((sum(after) / len(after)) - (sum(before) / len(before))) * 2.5)
+
+
+def _energy_drop_after(track: MixableTrack, time_seconds: float, duration_seconds: float) -> float:
+    start_energy = _energy_at_time(track, time_seconds)
+    end_energy = _energy_at_time(track, min(track.duration_seconds, time_seconds + duration_seconds))
+    return max(0.0, start_energy - end_energy)
 
 
 def _bpm_adjustment_percent(source_bpm: float | None, target_bpm: float | None) -> float:

@@ -10,12 +10,14 @@ The original single-track analysis endpoint is still supported.
 - Easy Mode browser interface at `/`
 - Advanced Mode Swagger documentation at `/docs`
 - Search for already analyzed tracks by title, file name, BPM, or key
+- Train a local DJ style profile from reference DJ mixes without adding them to the song queue
 - Single WAV/MP3 analysis through `POST /api/tracks/analyze`
 - Batch MP3 analysis through `POST /api/tracks/analyze-batch`
 - Duplicate upload detection using content hashes
 - JSON storage for track analysis, mix records, and job status
 - Compatibility scoring by tempo, key, energy, and structure
 - Automatic mix planning for two or more tracks with an optional genre/vibe direction
+- Learned style defaults for excerpt length, transition length, phrase behavior, and SFX density
 - Browser-side live deck with a draggable queue, Play Next, Transition Now, and Stop Live controls
 - Excerpt-based mixing so long songs or full DJ sets do not have to play end to end
 - Real WAV rendering with phrase-aware cue points, bass-swap crossfades, gain normalization, fade-in/fade-out, and clipping prevention
@@ -54,12 +56,13 @@ backend/
 |-- analysis_output/
 |-- mixes/
 |-- jobs/
+|-- style_profiles/
 |-- tests/
 |-- requirements.txt
 `-- README.md
 ```
 
-Generated files in `uploads`, `analysis_output`, `mixes`, and `jobs` are local working files and are ignored by Git.
+Generated files in `uploads`, `analysis_output`, `mixes`, `jobs`, and `style_profiles` are local working files and are ignored by Git.
 
 ## Setup
 
@@ -87,6 +90,7 @@ $env:AI_DJ_UPLOADS_DIR="C:\Path\To\uploads"
 $env:AI_DJ_ANALYSIS_OUTPUT_DIR="C:\Path\To\analysis_output"
 $env:AI_DJ_MIXES_DIR="C:\Path\To\mixes"
 $env:AI_DJ_JOBS_DIR="C:\Path\To\jobs"
+$env:AI_DJ_STYLE_PROFILES_DIR="C:\Path\To\style_profiles"
 ```
 
 ## Run The Backend
@@ -112,22 +116,23 @@ http://127.0.0.1:8000/docs
 
 1. Open `http://127.0.0.1:8000/`.
 2. Search saved tracks with **Search Music**, or click **Show Library** to list analyzed tracks.
-3. Add saved tracks to the mix, or drop MP3 files onto the page, choose multiple MP3s, or use **Choose Folder**.
-4. Optional: type a direction such as `smooth house`, `club energy`, `more hip-hop cuts`, or `chill lounge`.
-5. Use the **Live Queue** to drag songs into order.
-6. Click **Play Next** on a queued song to put it after the currently playing track.
-7. Set **Sec/song** to control how much of each track plays before transitioning.
-8. Set **Blend** to control crossfade length.
-9. Keep **Auto order** on for rendered mixes unless you want the selected order.
-10. Keep **DJ transition SFX** on for sweeps and downbeat impacts.
-11. Click **Make Live Mix** to start browser-side playback after local decoding. Use **Transition Now** to force the next blend.
-12. Click **Render Download** when you only want the final WAV output.
+3. Use **DJ Style Training** to choose full DJ sets as references, then click **Train Style**.
+4. Add saved tracks to the mix, import a direct MP3/WAV link, or drop MP3 files onto the page, choose multiple MP3s, or use **Choose Folder**.
+5. Optional: type a direction such as `smooth house`, `club energy`, `more hip-hop cuts`, or `chill lounge`.
+6. Use the **Live Queue** to drag songs into order.
+7. Click **Play Next** on a queued song to put it after the currently playing track.
+8. Leave **Sec/song** and **Blend** alone when you want AI to use the trained profile; changing either field becomes a manual override.
+9. Keep **Use trained style** on to apply the learned DJ reference profile.
+11. Keep **Auto order** on for rendered mixes unless you want the selected order.
+12. Keep **DJ transition SFX** on for filter sweeps, echo tails, risers, loop rolls, and downbeat impacts.
+13. Click **Make Live Mix** to let AI analyze, line up, and start the live browser deck. Use **Transition Now** to force the next blend.
+14. Click **Render Download** when you only want the final WAV output.
 
 Folder selection uses browser folder-upload support. Dragging a whole folder also works in browsers that expose dropped folder entries, such as current Chromium-based browsers.
 
-Online song search is not wired to a commercial music provider yet. To search full online catalogs legally, connect a licensed provider such as a store, streaming, or royalty-free catalog API and render only audio that the app is authorized to access.
+Online song search is not wired to a commercial music provider yet. The link importer accepts direct MP3/WAV links from sources you are authorized to download. YouTube-to-MP3 ripping is intentionally blocked; to use YouTube content, use official YouTube download features, your own exported content, or a licensed source with rights-holder permission.
 
-Full DJ mixes can be used as source/reference audio, but the app does not retrain an AI model from them yet. The next practical step is a style-profile analyzer that extracts transition spacing, average excerpt length, energy arc, and SFX density from reference DJ sets.
+Full DJ mixes can be used as reference audio. The app analyzes them for transition spacing, average excerpt length, phrase timing, phrase-boundary strength, energy-change behavior, spectral motion, SFX density, effect intensity, cue-point sensitivity, and preferred transition effects. Reference mixes are not added to the song library or live queue.
 
 ## Swagger: Upload Multiple Songs
 
@@ -164,6 +169,34 @@ GET /api/tracks/search?query=alpha
 
 This searches tracks that have already been analyzed and saved locally.
 
+## Swagger: Import An Authorized Audio Link
+
+Use:
+
+```text
+POST /api/tracks/import-url
+```
+
+Example:
+
+```json
+{
+  "url": "https://example.com/authorized-track.mp3"
+}
+```
+
+The endpoint downloads and analyzes direct MP3/WAV links only. YouTube links are rejected because YouTube restricts downloading content unless YouTube and the rights holder expressly allow it.
+
+## Swagger: Train DJ Style
+
+Use:
+
+```text
+POST /api/style-profiles/train
+```
+
+Upload one or more MP3/WAV DJ reference mixes in the `files` field. The response stores a default style profile used by future mix plans when `use_trained_style` is `true`. The profile includes learned transition timing plus an effect palette for smoother filter, echo, riser, roll, and impact choices.
+
 ## Swagger: Create And Render A Mix
 
 Create a plan first:
@@ -181,7 +214,8 @@ Create a plan first:
   "max_play_seconds_per_track": 75,
   "auto_order": true,
   "mix_direction": "smooth house with club energy",
-  "use_transition_sfx": true
+  "use_transition_sfx": true,
+  "use_trained_style": true
 }
 ```
 
@@ -232,7 +266,7 @@ The tests generate synthetic audio and do not require copyrighted music.
 - Easy Mode's "Live Mix" starts browser-side playback from selected files or saved tracks after local audio decoding. The final downloadable render still happens on the backend.
 - The live deck plays excerpts by default. Very long MP3s still need to be decoded by the browser before live playback starts.
 - Online song search requires a licensed provider integration before full external songs can be selected without local files.
-- Reference DJ mixes are not true model training yet; they can be analyzed in a future style-profile workflow.
+- Reference DJ mixes train a deterministic local style profile, not a neural model. It learns usable transition defaults from the audio patterns.
 - The mix direction steers ordering, transition length, and SFX style. It does not transform the source songs into a new genre.
 - Rendering runs in-process in this MVP. Job records exist, but Redis/Celery/RQ are not wired in yet.
 - Beat tracking, key detection, and section labels are estimates.
@@ -242,4 +276,4 @@ The tests generate synthetic audio and do not require copyrighted music.
 
 ## Recommended Next Step
 
-Add a reference-mix style profiler for full DJ sets, then add waveform previews and editable transition points in Easy Mode. After that, add FFmpeg-backed MP3 export and move long analysis/render work into a real background queue.
+Add waveform previews and editable transition points in Easy Mode, then evolve the deterministic style profile into a scored transition model. After that, add FFmpeg-backed MP3 export and move long analysis/render work into a real background queue.

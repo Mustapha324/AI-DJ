@@ -135,6 +135,16 @@ def test_batch_upload_rejects_unsupported_format(client, synthetic_wav_bytes):
     assert "Unsupported file type" in payload["errors"][0]["error"]
 
 
+def test_import_url_rejects_youtube_links(client):
+    response = client.post(
+        "/api/tracks/import-url",
+        json={"url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ"},
+    )
+
+    assert response.status_code == 400
+    assert "YouTube links cannot be imported" in response.json()["detail"]
+
+
 def test_compatible_tracks_are_returned_in_score_order(client, synthetic_mp3_named_uploads):
     upload_response = client.post(
         "/api/tracks/analyze-batch",

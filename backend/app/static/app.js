@@ -2,9 +2,12 @@ const selectedFiles = new Map();
 const selectedLibraryTracks = new Map();
 const analyzedTracks = new Map();
 const liveQueue = [];
+const referenceMixes = new Map();
 
 let liveSession = null;
 let draggedQueueId = null;
+let playSecondsTouched = false;
+let blendSecondsTouched = false;
 
 const els = {
   dropZone: document.getElementById("dropZone"),
@@ -17,13 +20,21 @@ const els = {
   transitionNowButton: document.getElementById("transitionNowButton"),
   stopLiveButton: document.getElementById("stopLiveButton"),
   downloadMixButton: document.getElementById("downloadMixButton"),
+  chooseReferenceButton: document.getElementById("chooseReferenceButton"),
+  trainStyleButton: document.getElementById("trainStyleButton"),
+  referenceInput: document.getElementById("referenceInput"),
+  referenceList: document.getElementById("referenceList"),
+  styleStatus: document.getElementById("styleStatus"),
   loadLibraryButton: document.getElementById("loadLibraryButton"),
   catalogSearchButton: document.getElementById("catalogSearchButton"),
   catalogSearch: document.getElementById("catalogSearch"),
   catalogResults: document.getElementById("catalogResults"),
+  audioUrlInput: document.getElementById("audioUrlInput"),
+  importUrlButton: document.getElementById("importUrlButton"),
   mixDirection: document.getElementById("mixDirection"),
   autoOrder: document.getElementById("autoOrder"),
   useSfx: document.getElementById("useSfx"),
+  useTrainedStyle: document.getElementById("useTrainedStyle"),
   targetMinutes: document.getElementById("targetMinutes"),
   playSeconds: document.getElementById("playSeconds"),
   transitionSeconds: document.getElementById("transitionSeconds"),
@@ -53,12 +64,33 @@ els.stopLiveButton.addEventListener("click", stopLiveMix);
 els.transitionNowButton.addEventListener("click", () => transitionToNextTrack(true));
 els.liveMixButton.addEventListener("click", () => makeMix({ live: true }));
 els.downloadMixButton.addEventListener("click", () => makeMix({ live: false }));
+els.chooseReferenceButton.addEventListener("click", () => els.referenceInput.click());
+els.trainStyleButton.addEventListener("click", trainDJStyle);
 els.loadLibraryButton.addEventListener("click", () => searchCatalog(""));
 els.catalogSearchButton.addEventListener("click", () => searchCatalog(els.catalogSearch.value));
+els.importUrlButton.addEventListener("click", importAudioUrl);
 els.catalogSearch.addEventListener("keydown", (event) => {
   if (event.key === "Enter") {
     event.preventDefault();
     searchCatalog(els.catalogSearch.value);
+  }
+});
+els.audioUrlInput.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") {
+    event.preventDefault();
+    importAudioUrl();
+  }
+});
+els.playSeconds.addEventListener("input", () => {
+  playSecondsTouched = true;
+});
+els.transitionSeconds.addEventListener("input", () => {
+  blendSecondsTouched = true;
+});
+els.useTrainedStyle.addEventListener("change", () => {
+  if (els.useTrainedStyle.checked) {
+    playSecondsTouched = false;
+    blendSecondsTouched = false;
   }
 });
 
@@ -70,6 +102,11 @@ els.fileInput.addEventListener("change", () => {
 els.folderInput.addEventListener("change", () => {
   addFiles(Array.from(els.folderInput.files || []));
   els.folderInput.value = "";
+});
+
+els.referenceInput.addEventListener("change", () => {
+  addReferenceMixes(Array.from(els.referenceInput.files || []));
+  els.referenceInput.value = "";
 });
 
 ["dragenter", "dragover"].forEach((eventName) => {
@@ -118,8 +155,26 @@ function addFiles(files) {
   setStatus(mp3s.length ? "Files ready" : "No MP3 files found", mp3s.length ? 16 : 0);
 }
 
+function addReferenceMixes(files) {
+  const audioFiles = files.filter((file) => {
+    const name = file.name.toLowerCase();
+    return name.endsWith(".mp3") || name.endsWith(".wav");
+  });
+  for (const file of audioFiles) {
+    referenceMixes.set(fileKey(file), file);
+  }
+  renderReferenceMixes();
+  setStatus(audioFiles.length ? "Reference mixes ready" : "No reference audio found", audioFiles.length ? 18 : 0);
+}
+
 function fileKey(file) {
   return `${file.webkitRelativePath || file.name}:${file.size}:${file.lastModified}`;
+}
+
+function sanitizeUploadName(name) {
+  const baseName = (name || "track").split(/[\\/]/).pop().trim();
+  const safeName = baseName.replace(/[^A-Za-z0-9._-]+/g, "_").replace(/^[._]+|[._]+$/g, "");
+  return safeName || "track";
 }
 
 async function filesFromDrop(dataTransfer) {
@@ -208,6 +263,83 @@ function renderCatalogResults(results) {
   }
 }
 
+function renderReferenceMixes() {
+  const files = Array.from(referenceMixes.values());
+  els.referenceList.innerHTML = "";
+  els.trainStyleButton.disabled = files.length === 0;
+
+  if (!files.length) {
+    const item = document.createElement("li");
+    item.className = "catalog-item";
+    item.innerHTML = `
+      <div>
+        <strong>No reference mixes selected</strong>
+        <div class="catalog-meta">Reference mixes train style only; they are not added to the live queue.</div>
+      </div>
+    `;
+    els.referenceList.appendChild(item);
+    return;
+  }
+
+  for (const file of files) {
+    const item = document.createElement("li");
+    item.className = "catalog-item";
+    item.innerHTML = `
+      <div>
+        <strong>${escapeHtml(file.name)}</strong>
+        <div class="catalog-meta">${formatBytes(file.size)} - training reference only</div>
+      </div>
+    `;
+    els.referenceList.appendChild(item);
+  }
+}
+
+async function trainDJStyle() {
+  const files = Array.from(referenceMixes.values());
+  if (!files.length) {
+    return;
+  }
+
+  try {
+    toggleBusy(true);
+    els.trainStyleButton.disabled = true;
+    setStatus("Training DJ style profile", 30);
+    const formData = new FormData();
+    formData.append("name", "Reference DJ Style");
+    for (const file of files) {
+      formData.append("files", file, file.name);
+    }
+    const profile = await fetchJson("/api/style-profiles/train", {
+      method: "POST",
+      body: formData,
+    });
+    updateStyleStatus(profile);
+    setStatus("DJ style trained", 100);
+  } catch (error) {
+    showErrors([{ file_name: "Style training", error: error.message || "Could not train from references." }]);
+    setStatus("Training failed", 0);
+  } finally {
+    toggleBusy(false);
+    els.trainStyleButton.disabled = referenceMixes.size === 0;
+  }
+}
+
+async function loadStyleStatus() {
+  try {
+    const profile = await fetchJson("/api/style-profiles/default");
+    updateStyleStatus(profile);
+  } catch {
+    els.styleStatus.textContent = "No profile";
+  }
+}
+
+function updateStyleStatus(profile) {
+  const intensity = Math.round((profile.effect_intensity || profile.sfx_density || 0) * 100);
+  els.styleStatus.textContent = `${profile.reference_count} refs / ${Math.round(profile.max_play_seconds_per_track)}s / FX ${intensity}%`;
+  els.playSeconds.value = Math.round(profile.max_play_seconds_per_track);
+  els.transitionSeconds.value = Math.round(profile.transition_duration_seconds);
+}
+
 function addLibraryTrack(track, catalogResults) {
   selectedLibraryTracks.set(track.track_id, track);
   ensureQueueItem({
@@ -221,6 +353,60 @@ function addLibraryTrack(track, catalogResults) {
   renderQueue();
   renderCatalogResults(catalogResults);
   setStatus("Track added to queue", 24);
+}
+
+async function importAudioUrl() {
+  const url = els.audioUrlInput.value.trim();
+  if (!url) {
+    return;
+  }
+  if (isYoutubeUrl(url)) {
+    showErrors([
+      {
+        file_name: "Audio link",
+        error: "YouTube links cannot be converted to MP3 here. Paste a direct MP3/WAV link you are allowed to use.",
+      },
+    ]);
+    setStatus("Use direct audio link", 0);
+    return;
+  }
+
+  try {
+    toggleBusy(true);
+    setStatus("Importing audio link", 22);
+    const track = await fetchJson("/api/tracks/import-url", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url }),
+    });
+    selectedLibraryTracks.set(track.track_id, track);
+    ensureQueueItem({
+      id: `track:${track.track_id}`,
+      type: "track",
+      trackId: track.track_id,
+      name: track.title || track.file_name,
+      meta: `${formatBpm(track.estimated_bpm)} - ${track.key?.display_name || "Unknown key"}`,
+    });
+    els.audioUrlInput.value = "";
+    renderTracks();
+    renderQueue();
+    clearErrors();
+    setStatus("Audio link added", 35);
+  } catch (error) {
+    showErrors([{ file_name: "Audio link", error: error.message || "Could not import this link." }]);
+    setStatus("Import failed", 0);
+  } finally {
+    toggleBusy(false);
+  }
+}
+
+function isYoutubeUrl(url) {
+  try {
+    const host = new URL(url).hostname.toLowerCase();
+    return host === "youtu.be" || host === "youtube.com" || host.endsWith(".youtube.com");
+  } catch {
+    return false;
+  }
 }
 
 function ensureQueueItem(item) {
@@ -403,16 +589,8 @@ async function makeMix({ live }) {
 
   toggleBusy(true);
   clearErrors();
-  if (!live) {
-    stopLiveMix();
-    hidePlayer();
-  }
-
-  if (live) {
-    startBrowserLiveMix(liveQueue.slice()).catch((error) => {
-      showErrors([{ file_name: "Live Mix", error: error.message || "Live playback could not start." }]);
-    });
-  }
+  stopLiveMix();
+  if (!live) hidePlayer();
 
   try {
     analyzedTracks.clear();
@@ -420,14 +598,34 @@ async function makeMix({ live }) {
     const fileTrackIdsByQueueId = new Map();
 
     if (fileItems.length) {
-      setStatus(live ? "Live playing, analyzing files" : "Uploading and analyzing", 32);
+      setStatus(live ? "AI analyzing tracks" : "Uploading and analyzing", 32);
       const files = fileItems.map((item) => selectedFiles.get(item.key)).filter(Boolean);
+      const fileItemsBySafeName = new Map();
+      for (const item of fileItems) {
+        const file = selectedFiles.get(item.key);
+        const safeName = sanitizeUploadName(file?.name || item.name);
+        if (!fileItemsBySafeName.has(safeName)) {
+          fileItemsBySafeName.set(safeName, []);
+        }
+        fileItemsBySafeName.get(safeName).push(item);
+      }
       const batch = await analyzeFiles(files);
       showErrors(batch.errors || []);
       const batchTracks = batch.tracks || [];
-      for (let index = 0; index < fileItems.length; index += 1) {
-        if (batchTracks[index]?.track_id) {
-          fileTrackIdsByQueueId.set(fileItems[index].id, batchTracks[index].track_id);
+      const unmatchedResults = [];
+      for (const result of batchTracks) {
+        const queueMatches = fileItemsBySafeName.get(result.file_name) || [];
+        const queueItem = queueMatches.shift();
+        if (queueItem?.id && result.track_id) {
+          fileTrackIdsByQueueId.set(queueItem.id, result.track_id);
+        } else {
+          unmatchedResults.push(result);
+        }
+      }
+      const unmappedItems = fileItems.filter((item) => !fileTrackIdsByQueueId.has(item.id));
+      for (let index = 0; index < unmatchedResults.length && index < unmappedItems.length; index += 1) {
+        if (unmatchedResults[index]?.track_id) {
+          fileTrackIdsByQueueId.set(unmappedItems[index].id, unmatchedResults[index].track_id);
         }
       }
     }
@@ -441,15 +639,23 @@ async function makeMix({ live }) {
       throw new Error("At least two unique analyzed tracks are needed for a mix.");
     }
 
-    setStatus(live ? "Live playing, planning render" : "Loading track details", 52);
+    setStatus(live ? "AI reading BPM, key, and energy" : "Loading track details", 52);
     const tracks = await Promise.all(trackIds.map(fetchTrack));
     for (const track of tracks) {
       analyzedTracks.set(track.track_id, track);
     }
     renderTracks();
 
-    setStatus(live ? "Live playing, polishing transitions" : "Planning transitions", 68);
+    setStatus(live ? "AI lining up the live mix" : "Planning transitions", 68);
     const plan = await createPlan(trackIds);
+
+    if (live) {
+      const plannedQueue = queueOrderedByPlan(plan, fileTrackIdsByQueueId, tracks);
+      applyPlanToLiveControls(plan);
+      renderQueue();
+      setStatus("Starting AI-lined live deck", 76);
+      await startBrowserLiveMix(plannedQueue, plan);
+    }
 
     setStatus(live ? "Live playing, rendering download" : "Rendering audio", 84);
     const record = await renderMix(plan.mix_id);
@@ -464,7 +670,49 @@ async function makeMix({ live }) {
   }
 }
 
-async function startBrowserLiveMix(queueItems) {
+function queueOrderedByPlan(plan, fileTrackIdsByQueueId, tracks) {
+  const trackById = new Map(tracks.map((track) => [track.track_id, track]));
+  const queueByTrackId = new Map();
+
+  for (const item of liveQueue) {
+    const trackId = item.type === "track" ? item.trackId : fileTrackIdsByQueueId.get(item.id);
+    if (!trackId || queueByTrackId.has(trackId)) {
+      continue;
+    }
+    const track = trackById.get(trackId);
+    queueByTrackId.set(trackId, {
+      ...item,
+      trackId,
+      bpm: track?.estimated_bpm || item.bpm || null,
+      keyName: track?.key?.display_name || item.keyName || null,
+      meta: track ? `${formatBpm(track.estimated_bpm)} - ${track.key?.display_name || "Unknown key"}` : item.meta,
+    });
+  }
+
+  const ordered = plan.track_order.map((trackId) => queueByTrackId.get(trackId)).filter(Boolean);
+  const missing = liveQueue
+    .map((item) => {
+      const trackId = item.type === "track" ? item.trackId : fileTrackIdsByQueueId.get(item.id);
+      return trackId ? queueByTrackId.get(trackId) : item;
+    })
+    .filter((item) => item && !ordered.some((queued) => queued.id === item.id));
+
+  liveQueue.splice(0, liveQueue.length, ...ordered, ...missing);
+  return liveQueue.slice();
+}
+
+function applyPlanToLiveControls(plan) {
+  if (plan.max_play_seconds_per_track) {
+    els.playSeconds.value = Math.round(plan.max_play_seconds_per_track);
+  }
+  if (plan.transitions?.length) {
+    const averageTransition =
+      plan.transitions.reduce((sum, transition) => sum + transition.duration_seconds, 0) / plan.transitions.length;
+    els.transitionSeconds.value = Math.round(averageTransition);
+  }
+}
+
+async function startBrowserLiveMix(queueItems, plan = null) {
   const sources = queueItems.map(sourceFromQueueItem).filter(Boolean);
   if (sources.length < 2) {
     return;
@@ -484,9 +732,12 @@ async function startBrowserLiveMix(queueItems) {
     currentItemId: null,
     currentSource: null,
     currentGain: null,
+    currentChannel: null,
     timers: [],
+    activeSources: new Set(),
     playing: false,
     transitioning: false,
+    plan,
     segmentSeconds: numericValue(els.playSeconds, 75),
     transitionSeconds: numericValue(els.transitionSeconds, 10),
     withSfx: els.useSfx.checked,
@@ -501,10 +752,19 @@ async function startBrowserLiveMix(queueItems) {
     setStatus(`Loading live track ${index + 1} of ${sources.length}`, 20 + index * 6);
     const arrayBuffer = await sources[index].loadArrayBuffer();
     const buffer = await context.decodeAudioData(arrayBuffer.slice(0));
+    const placement = plannedPlacementForTrack(plan, sources[index].trackId);
     liveSession.decodedQueue.push({
       queueId: sources[index].queueId,
+      trackId: sources[index].trackId,
       name: sources[index].name,
+      bpm: sources[index].bpm,
+      keyName: sources[index].keyName,
       buffer,
+      startOffset: placement?.source_start_time || 0,
+      plannedWindow:
+        placement && placement.source_end_time > placement.source_start_time
+          ? placement.source_end_time - placement.source_start_time
+          : null,
     });
   }
 
@@ -520,7 +780,10 @@ function sourceFromQueueItem(item) {
     }
     return {
       queueId: item.id,
+      trackId: item.trackId,
       name: item.name,
+      bpm: item.bpm,
+      keyName: item.keyName,
       loadArrayBuffer: () => file.arrayBuffer(),
     };
   }
@@ -528,7 +791,10 @@ function sourceFromQueueItem(item) {
   if (item.type === "track") {
     return {
       queueId: item.id,
+      trackId: item.trackId,
       name: item.name,
+      bpm: item.bpm,
+      keyName: item.keyName,
       loadArrayBuffer: async () => {
         const response = await fetch(`/api/tracks/${encodeURIComponent(item.trackId)}/audio`);
         if (!response.ok) {
@@ -552,24 +818,31 @@ function playLiveTrackAtIndex(index, fadeInSeconds) {
   const { context, decodedQueue } = liveSession;
   const track = decodedQueue[index];
   const now = context.currentTime + 0.05;
-  const duration = liveTrackWindow(track.buffer.duration);
+  const nextTrack = decodedQueue[index + 1] || null;
+  const transitionSeconds = nextTrack ? transitionSecondsBetween(track, nextTrack) : liveSession.transitionSeconds;
+  const duration = livePreTransitionWindow(track, transitionSeconds);
+  const offset = liveTrackStartOffset(track);
+  const playbackDuration = livePlaybackDuration(track, duration, transitionSeconds, 1);
   const source = context.createBufferSource();
-  const gain = context.createGain();
+  const channel = createLiveChannel(context, now);
 
   source.buffer = track.buffer;
-  source.connect(gain).connect(context.destination);
-  gain.gain.setValueAtTime(0.0001, now);
-  gain.gain.linearRampToValueAtTime(1.0, now + Math.min(fadeInSeconds, 2.0));
-  source.start(now, 0, duration + liveSession.transitionSeconds + 0.2);
+  source.connect(channel.eq);
+  channel.gain.gain.setValueAtTime(0.0001, now);
+  scheduleEqualPowerFade(channel.gain.gain, now, Math.min(fadeInSeconds, 2.0), true);
+  source.start(now, offset, playbackDuration);
+  liveSession.activeSources.add(source);
 
   liveSession.currentIndex = index;
   liveSession.currentItemId = track.queueId;
   liveSession.currentSource = source;
-  liveSession.currentGain = gain;
+  liveSession.currentGain = channel.gain;
+  liveSession.currentChannel = channel;
   liveSession.playing = true;
   liveSession.transitioning = false;
 
   source.addEventListener("ended", () => {
+    liveSession?.activeSources?.delete(source);
     if (liveSession?.currentSource === source && !liveSession.transitioning) {
       transitionToNextTrack(false);
     }
@@ -580,10 +853,27 @@ function playLiveTrackAtIndex(index, fadeInSeconds) {
   renderQueue();
 }
 
-function liveTrackWindow(bufferDuration) {
-  const segment = Math.max(15, numericValue(els.playSeconds, liveSession?.segmentSeconds || 75));
-  const transition = Math.max(2, numericValue(els.transitionSeconds, liveSession?.transitionSeconds || 10));
-  return Math.max(4, Math.min(segment, Math.max(4, bufferDuration - transition)));
+function liveTrackStartOffset(track) {
+  const requested = Number.isFinite(track.startOffset) ? track.startOffset : 0;
+  const latest = Math.max(0, track.buffer.duration - 1);
+  return Math.max(0, Math.min(requested, latest));
+}
+
+function livePreTransitionWindow(track, transitionSeconds) {
+  const available = Math.max(1, track.buffer.duration - liveTrackStartOffset(track));
+  const controlSeconds = Math.max(15, numericValue(els.playSeconds, liveSession?.segmentSeconds || 75));
+  const plannedSeconds =
+    !playSecondsTouched && Number.isFinite(track.plannedWindow)
+      ? Math.max(4, track.plannedWindow - transitionSeconds)
+      : null;
+  const preferred = plannedSeconds || controlSeconds;
+  return Math.max(4, Math.min(preferred, Math.max(4, available - Math.min(transitionSeconds, available * 0.5))));
+}
+
+function livePlaybackDuration(track, preTransitionSeconds, transitionSeconds, playbackRate) {
+  const available = Math.max(0, track.buffer.duration - liveTrackStartOffset(track));
+  const requested = Math.max(1, preTransitionSeconds + transitionSeconds + 0.2) * Math.max(0.1, playbackRate);
+  return Math.min(available, requested);
 }
 
 function transitionToNextTrack(manual) {
@@ -603,21 +893,36 @@ function transitionToNextTrack(manual) {
   liveSession.transitioning = true;
   const { context } = liveSession;
   const now = context.currentTime + 0.05;
-  const transition = Math.max(2, numericValue(els.transitionSeconds, liveSession.transitionSeconds));
   const nextTrack = liveSession.decodedQueue[nextIndex];
+  const currentTrack = liveSession.decodedQueue[liveSession.currentIndex];
+  const transition = transitionSecondsBetween(currentTrack, nextTrack);
+  const transitionEffects = liveTransitionEffects(currentTrack, nextTrack);
+  const playbackRate = aiPlaybackRateForNext(nextTrack);
+  const nextOffset = liveTrackStartOffset(nextTrack);
+  const nextWindow = livePreTransitionWindow(
+    nextTrack,
+    liveSession.decodedQueue[nextIndex + 1] ? transitionSecondsBetween(nextTrack, liveSession.decodedQueue[nextIndex + 1]) : transition,
+  );
   const nextSource = context.createBufferSource();
-  const nextGain = context.createGain();
+  const nextChannel = createLiveChannel(context, now, -10);
 
   nextSource.buffer = nextTrack.buffer;
-  nextSource.connect(nextGain).connect(context.destination);
-  nextGain.gain.setValueAtTime(0.0001, now);
-  nextGain.gain.linearRampToValueAtTime(1.0, now + transition);
-  nextSource.start(now, 0, liveTrackWindow(nextTrack.buffer.duration) + transition + 0.2);
+  nextSource.playbackRate.setValueAtTime(playbackRate, now);
+  nextSource.connect(nextChannel.eq);
+  nextChannel.gain.gain.setValueAtTime(0.0001, now);
+  scheduleEqualPowerFade(nextChannel.gain.gain, now, transition, true);
+  nextChannel.eq.gain.linearRampToValueAtTime(0, now + transition * 0.7);
+  nextSource.start(now, nextOffset, livePlaybackDuration(nextTrack, nextWindow, transition, playbackRate));
+  liveSession.activeSources.add(nextSource);
 
   if (liveSession.currentGain) {
     liveSession.currentGain.gain.cancelScheduledValues(now);
-    liveSession.currentGain.gain.setValueAtTime(Math.max(liveSession.currentGain.gain.value, 0.0001), now);
-    liveSession.currentGain.gain.linearRampToValueAtTime(0.0001, now + transition);
+    scheduleEqualPowerFade(liveSession.currentGain.gain, now, transition, false);
+  }
+  if (liveSession.currentChannel) {
+    liveSession.currentChannel.eq.gain.cancelScheduledValues(now);
+    liveSession.currentChannel.eq.gain.setValueAtTime(0, now);
+    liveSession.currentChannel.eq.gain.linearRampToValueAtTime(-14, now + transition * 0.55);
   }
   if (liveSession.currentSource) {
     const oldSource = liveSession.currentSource;
@@ -628,26 +933,156 @@ function transitionToNextTrack(manual) {
         } catch {
           // Source may already be stopped.
         }
+        liveSession?.activeSources?.delete(oldSource);
       }, transition * 1000 + 80),
     );
   }
 
+  nextSource.addEventListener("ended", () => {
+    liveSession?.activeSources?.delete(nextSource);
+    if (liveSession?.currentSource === nextSource && !liveSession.transitioning) {
+      transitionToNextTrack(false);
+    }
+  });
+
   if (liveSession.withSfx) {
-    scheduleBrowserSfx(context, now, transition);
+    scheduleBrowserChannelEffects(liveSession.currentChannel, now, transition, transitionEffects);
+    scheduleBrowserSfx(context, now, transition, transitionEffects);
   }
 
   liveSession.currentIndex = nextIndex;
   liveSession.currentItemId = nextTrack.queueId;
   liveSession.currentSource = nextSource;
-  liveSession.currentGain = nextGain;
-  liveSession.transitioning = false;
-  const nextWindow = liveTrackWindow(nextTrack.buffer.duration);
+  liveSession.currentGain = nextChannel.gain;
+  liveSession.currentChannel = nextChannel;
+  liveSession.timers.push(
+    window.setTimeout(() => {
+      if (liveSession?.currentSource === nextSource) {
+        liveSession.transitioning = false;
+      }
+    }, transition * 1000 + 120),
+  );
   liveSession.timers.push(window.setTimeout(() => transitionToNextTrack(false), Math.max(1000, nextWindow * 1000)));
-  setStatus(manual ? "Manual transition" : "Auto transition", 52);
+  setStatus(manual ? "Manual transition" : "AI transition", 52);
   renderQueue();
 }
 
-function scheduleBrowserSfx(context, transitionStart, transitionSeconds) {
+function plannedPlacementForTrack(plan, trackId) {
+  if (!plan || !trackId) {
+    return null;
+  }
+  return plan.placements?.find((placement) => placement.track_id === trackId) || null;
+}
+
+function plannedTransitionBetween(sourceTrack, targetTrack) {
+  if (!liveSession?.plan || !sourceTrack?.trackId || !targetTrack?.trackId) {
+    return null;
+  }
+  return (
+    liveSession.plan.transitions?.find(
+      (transition) =>
+        transition.source_track_id === sourceTrack.trackId && transition.target_track_id === targetTrack.trackId,
+    ) || null
+  );
+}
+
+function transitionSecondsBetween(sourceTrack, targetTrack) {
+  if (!blendSecondsTouched) {
+    const planned = plannedTransitionBetween(sourceTrack, targetTrack);
+    if (planned?.duration_seconds) {
+      return Math.max(2, Math.min(45, planned.duration_seconds));
+    }
+  }
+  return Math.max(2, numericValue(els.transitionSeconds, liveSession.transitionSeconds));
+}
+
+function aiPlaybackRateForNext(nextTrack) {
+  const current = liveSession?.decodedQueue?.[liveSession.currentIndex];
+  if (!current?.bpm || !nextTrack?.bpm) {
+    return 1;
+  }
+  const ratio = current.bpm / nextTrack.bpm;
+  return ratio >= 0.94 && ratio <= 1.06 ? ratio : 1;
+}
+
+function createLiveChannel(context, now, initialBassDb = 0) {
+  const eq = context.createBiquadFilter();
+  const gain = context.createGain();
+  const delay = context.createDelay(1.2);
+  const feedback = context.createGain();
+  const delayWet = context.createGain();
+  eq.type = "lowshelf";
+  eq.frequency.setValueAtTime(180, now);
+  eq.gain.setValueAtTime(initialBassDb, now);
+  delay.delayTime.setValueAtTime(0.18, now);
+  feedback.gain.setValueAtTime(0.0001, now);
+  delayWet.gain.setValueAtTime(0.0001, now);
+  eq.connect(gain);
+  gain.connect(context.destination);
+  gain.connect(delay);
+  delay.connect(feedback);
+  feedback.connect(delay);
+  delay.connect(delayWet).connect(context.destination);
+  return { eq, gain, delay, feedback, delayWet };
+}
+
+function scheduleEqualPowerFade(gainParam, startTime, duration, fadeIn) {
+  const steps = 14;
+  gainParam.cancelScheduledValues(startTime);
+  gainParam.setValueAtTime(fadeIn ? 0.0001 : 1.0, startTime);
+  for (let step = 1; step <= steps; step += 1) {
+    const progress = step / steps;
+    const curve = fadeIn ? Math.sin(progress * Math.PI * 0.5) : Math.cos(progress * Math.PI * 0.5);
+    gainParam.linearRampToValueAtTime(Math.max(0.0001, curve), startTime + duration * progress);
+  }
+}
+
+function liveTransitionEffects(sourceTrack, targetTrack) {
+  const planned = plannedTransitionBetween(sourceTrack, targetTrack);
+  return planned?.sfx?.length ? planned.sfx : ["filter_sweep", "echo_tail", "reverse_swell", "impact"];
+}
+
+function scheduleBrowserChannelEffects(channel, transitionStart, transitionSeconds, effects) {
+  if (!channel || (!effects.includes("echo_tail") && !effects.includes("echo_freeze"))) {
+    return;
+  }
+  const freeze = effects.includes("echo_freeze");
+  const echoTime = freeze ? Math.max(0.1, Math.min(0.22, transitionSeconds / 12)) : Math.max(0.12, Math.min(0.38, transitionSeconds / 8));
+  channel.delay.delayTime.cancelScheduledValues(transitionStart);
+  channel.feedback.gain.cancelScheduledValues(transitionStart);
+  channel.delayWet.gain.cancelScheduledValues(transitionStart);
+  channel.delay.delayTime.setValueAtTime(echoTime, transitionStart);
+  channel.feedback.gain.setValueAtTime(0.0001, transitionStart);
+  channel.feedback.gain.linearRampToValueAtTime(freeze ? 0.48 : 0.32, transitionStart + transitionSeconds * 0.35);
+  channel.feedback.gain.exponentialRampToValueAtTime(0.0001, transitionStart + transitionSeconds + 1.2);
+  channel.delayWet.gain.setValueAtTime(0.0001, transitionStart);
+  channel.delayWet.gain.linearRampToValueAtTime(freeze ? 0.24 : 0.18, transitionStart + transitionSeconds * 0.45);
+  channel.delayWet.gain.exponentialRampToValueAtTime(0.0001, transitionStart + transitionSeconds + 1.4);
+}
+
+function scheduleBrowserSfx(context, transitionStart, transitionSeconds, effects = []) {
+  const hasSweep = effects.some((effect) => ["filter_sweep", "noise_sweep", "soft_sweep"].includes(effect));
+  if (hasSweep) {
+    scheduleBrowserSweep(context, transitionStart, transitionSeconds, effects.includes("soft_sweep") ? 0.018 : 0.034);
+  }
+  if (effects.includes("reverb_riser")) {
+    scheduleBrowserRiser(context, transitionStart, transitionSeconds);
+  }
+  if (effects.includes("reverse_swell")) {
+    scheduleBrowserReverseSwell(context, transitionStart, transitionSeconds);
+  }
+  if (effects.includes("loop_roll")) {
+    scheduleBrowserRollTicks(context, transitionStart, transitionSeconds);
+  }
+  if (effects.includes("brake_cut")) {
+    scheduleBrowserBrakeCut(context, transitionStart, transitionSeconds);
+  }
+  if (effects.includes("impact")) {
+    scheduleBrowserImpact(context, transitionStart + transitionSeconds - 0.04);
+  }
+}
+
+function scheduleBrowserSweep(context, transitionStart, transitionSeconds, amplitude) {
   const sweepDuration = Math.max(0.8, Math.min(transitionSeconds, 7.5));
   const sweep = context.createOscillator();
   const sweepGain = context.createGain();
@@ -655,14 +1090,96 @@ function scheduleBrowserSfx(context, transitionStart, transitionSeconds) {
   sweep.frequency.setValueAtTime(420, transitionStart);
   sweep.frequency.exponentialRampToValueAtTime(4200, transitionStart + sweepDuration);
   sweepGain.gain.setValueAtTime(0.0001, transitionStart);
-  sweepGain.gain.linearRampToValueAtTime(0.035, transitionStart + sweepDuration * 0.65);
+  sweepGain.gain.linearRampToValueAtTime(amplitude, transitionStart + sweepDuration * 0.65);
   sweepGain.gain.exponentialRampToValueAtTime(0.0001, transitionStart + sweepDuration);
   sweep.connect(sweepGain).connect(context.destination);
   sweep.start(transitionStart);
   sweep.stop(transitionStart + sweepDuration + 0.05);
   liveSession?.timers.push(window.setTimeout(() => sweep.disconnect(), (sweepDuration + 0.2) * 1000));
+}
 
-  const impactTime = transitionStart + transitionSeconds - 0.04;
+function scheduleBrowserRiser(context, transitionStart, transitionSeconds) {
+  const duration = Math.max(0.6, Math.min(transitionSeconds, 5));
+  const buffer = context.createBuffer(1, Math.max(1, Math.floor(context.sampleRate * duration)), context.sampleRate);
+  const data = buffer.getChannelData(0);
+  for (let index = 0; index < data.length; index += 1) {
+    data[index] = (Math.random() * 2 - 1) * (index / data.length);
+  }
+  const noise = context.createBufferSource();
+  const filter = context.createBiquadFilter();
+  const gain = context.createGain();
+  noise.buffer = buffer;
+  filter.type = "highpass";
+  filter.frequency.setValueAtTime(460, transitionStart);
+  filter.frequency.exponentialRampToValueAtTime(5200, transitionStart + duration);
+  gain.gain.setValueAtTime(0.0001, transitionStart);
+  gain.gain.linearRampToValueAtTime(0.035, transitionStart + duration * 0.76);
+  gain.gain.exponentialRampToValueAtTime(0.0001, transitionStart + duration);
+  noise.connect(filter).connect(gain).connect(context.destination);
+  noise.start(transitionStart);
+  noise.stop(transitionStart + duration + 0.05);
+}
+
+function scheduleBrowserReverseSwell(context, transitionStart, transitionSeconds) {
+  const duration = Math.max(0.5, Math.min(transitionSeconds * 0.75, 4.5));
+  const buffer = context.createBuffer(1, Math.max(1, Math.floor(context.sampleRate * duration)), context.sampleRate);
+  const data = buffer.getChannelData(0);
+  for (let index = 0; index < data.length; index += 1) {
+    const progress = index / Math.max(data.length - 1, 1);
+    data[index] = (Math.random() * 2 - 1) * progress * progress;
+  }
+  const source = context.createBufferSource();
+  const filter = context.createBiquadFilter();
+  const gain = context.createGain();
+  source.buffer = buffer;
+  filter.type = "bandpass";
+  filter.frequency.setValueAtTime(720, transitionStart);
+  filter.frequency.exponentialRampToValueAtTime(3600, transitionStart + duration);
+  gain.gain.setValueAtTime(0.0001, transitionStart);
+  gain.gain.linearRampToValueAtTime(0.03, transitionStart + duration * 0.82);
+  gain.gain.exponentialRampToValueAtTime(0.0001, transitionStart + duration);
+  source.connect(filter).connect(gain).connect(context.destination);
+  source.start(transitionStart);
+  source.stop(transitionStart + duration + 0.05);
+}
+
+function scheduleBrowserRollTicks(context, transitionStart, transitionSeconds) {
+  const start = transitionStart + transitionSeconds * 0.58;
+  const step = Math.max(0.09, Math.min(0.18, transitionSeconds / 32));
+  for (let time = start; time < transitionStart + transitionSeconds - 0.08; time += step) {
+    const tick = context.createOscillator();
+    const gain = context.createGain();
+    tick.type = "triangle";
+    tick.frequency.setValueAtTime(190 + (time - start) * 260, time);
+    gain.gain.setValueAtTime(0.0001, time);
+    gain.gain.linearRampToValueAtTime(0.026, time + 0.012);
+    gain.gain.exponentialRampToValueAtTime(0.0001, time + 0.075);
+    tick.connect(gain).connect(context.destination);
+    tick.start(time);
+    tick.stop(time + 0.08);
+  }
+}
+
+function scheduleBrowserBrakeCut(context, transitionStart, transitionSeconds) {
+  const start = transitionStart + transitionSeconds * 0.84;
+  const brake = context.createOscillator();
+  const gain = context.createGain();
+  brake.type = "sawtooth";
+  brake.frequency.setValueAtTime(220, start);
+  brake.frequency.exponentialRampToValueAtTime(42, start + 0.38);
+  gain.gain.setValueAtTime(0.0001, start);
+  gain.gain.linearRampToValueAtTime(0.018, start + 0.04);
+  gain.gain.exponentialRampToValueAtTime(0.0001, start + 0.42);
+  brake.connect(gain).connect(context.destination);
+  brake.start(start);
+  brake.stop(start + 0.46);
+}
+
+function scheduleBrowserImpact(impactTime) {
+  const context = liveSession?.context;
+  if (!context) {
+    return;
+  }
   const impact = context.createOscillator();
   const impactGain = context.createGain();
   impact.type = "sine";
@@ -690,7 +1207,8 @@ function stopLiveMix() {
     return;
   }
   clearLiveTimers();
-  for (const source of [liveSession.currentSource]) {
+  const sources = liveSession.activeSources?.size ? Array.from(liveSession.activeSources) : [liveSession.currentSource];
+  for (const source of sources) {
     try {
       source?.stop();
     } catch {
@@ -727,15 +1245,17 @@ async function fetchTrack(trackId) {
 async function createPlan(trackIds) {
   const targetMinutes = Number.parseFloat(els.targetMinutes.value);
   const playSeconds = numericValue(els.playSeconds, 75);
+  const useAiTiming = els.useTrainedStyle.checked && !playSecondsTouched;
   const body = {
     track_ids: trackIds,
     mix_name: `Easy Mix ${new Date().toLocaleString()}`,
     transition_bars: 8,
     target_duration_minutes: Number.isFinite(targetMinutes) ? targetMinutes : null,
-    max_play_seconds_per_track: playSeconds,
+    max_play_seconds_per_track: useAiTiming ? null : playSeconds,
     auto_order: els.autoOrder.checked,
     mix_direction: els.mixDirection.value.trim() || null,
     use_transition_sfx: els.useSfx.checked,
+    use_trained_style: els.useTrainedStyle.checked,
   };
 
   return fetchJson("/api/mixes/plan", {
@@ -829,12 +1349,17 @@ function clearAll() {
   selectedFiles.clear();
   selectedLibraryTracks.clear();
   analyzedTracks.clear();
+  referenceMixes.clear();
+  playSecondsTouched = false;
+  blendSecondsTouched = false;
+  els.audioUrlInput.value = "";
   liveQueue.splice(0, liveQueue.length);
   stopLiveMix();
   renderFiles();
   renderTracks();
   renderQueue();
   renderCatalogResults([]);
+  renderReferenceMixes();
   hidePlayer();
   clearErrors();
   setStatus("Ready", 0);
@@ -854,6 +1379,8 @@ function toggleBusy(isBusy) {
     els.chooseFolderButton,
     els.loadLibraryButton,
     els.catalogSearchButton,
+    els.importUrlButton,
+    els.chooseReferenceButton,
   ]) {
     button.disabled = isBusy;
   }
@@ -916,3 +1443,5 @@ renderFiles();
 renderTracks();
 renderQueue();
 renderCatalogResults([]);
+renderReferenceMixes();
+loadStyleStatus();

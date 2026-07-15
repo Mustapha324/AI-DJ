@@ -6,7 +6,9 @@ import uuid
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
+from urllib.parse import unquote, urlparse
 
+import httpx
 from fastapi import UploadFile
 
 from app.config import Settings, ensure_storage_dirs
@@ -72,6 +74,73 @@ class TrackService:
         if bytes_written == 0:
             destination.unlink(missing_ok=True)
             raise InvalidAudioFileError("The uploaded file is empty.")
+
+        return SavedUpload(
+            path=destination,
+            safe_file_name=safe_name,
+            content_hash=digest.hexdigest(),
+            size_bytes=bytes_written,
+        )
+
+    async def save_remote_audio_for_analysis(
+        self,
+        url: str,
+        track_id: str,
+        file_name: str | None = None,
+    ) -> SavedUpload:
+        parsed = urlparse(url.strip())
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise InvalidAudioFileError("Paste a valid HTTP or HTTPS audio link.")
+        if _is_youtube_host(parsed.netloc):
+            raise InvalidAudioFileError(
+                "YouTube links cannot be imported as MP3s here. Use audio you own, have permission to download, "
+                "or paste a direct MP3/WAV link from an authorized source."
+            )
+        if _is_blocked_host(parsed.hostname):
+            raise InvalidAudioFileError("Local or private network links are not supported for import.")
+
+        safe_name = _safe_remote_file_name(file_name, parsed.path)
+        destination = self.settings.uploads_dir / f"{track_id}_{safe_name}"
+        digest = sha256()
+        bytes_written = 0
+
+        try:
+            async with httpx.AsyncClient(follow_redirects=True, timeout=30.0) as client:
+                async with client.stream("GET", url) as response:
+                    response.raise_for_status()
+                    final_host = urlparse(str(response.url)).netloc
+                    if _is_youtube_host(final_host):
+                        raise InvalidAudioFileError("YouTube redirects are not supported for audio import.")
+                    content_type = response.headers.get("content-type", "").split(";")[0].strip().lower()
+                    safe_name = _safe_remote_file_name(file_name or _name_from_response(response, parsed.path), parsed.path)
+                    if not _remote_audio_allowed(safe_name, content_type, self.settings.allowed_content_types):
+                        raise InvalidAudioFileError("Direct audio links must point to an MP3 or WAV file.")
+                    destination = self.settings.uploads_dir / f"{track_id}_{safe_name}"
+                    with destination.open("wb") as output_file:
+                        async for chunk in response.aiter_bytes(1024 * 1024):
+                            if not chunk:
+                                continue
+                            bytes_written += len(chunk)
+                            if bytes_written > self.settings.max_upload_size_bytes:
+                                raise InvalidAudioFileError("The linked audio is larger than the configured upload limit.")
+                            digest.update(chunk)
+                            output_file.write(chunk)
+        except InvalidAudioFileError:
+            destination.unlink(missing_ok=True)
+            raise
+        except httpx.HTTPStatusError as exc:
+            destination.unlink(missing_ok=True)
+            raise InvalidAudioFileError(f"The audio link returned HTTP {exc.response.status_code}.") from exc
+        except httpx.HTTPError as exc:
+            destination.unlink(missing_ok=True)
+            raise InvalidAudioFileError("Could not download the linked audio.") from exc
+        except Exception:
+            destination.unlink(missing_ok=True)
+            raise
+
+        if bytes_written == 0:
+            destination.unlink(missing_ok=True)
+            raise InvalidAudioFileError("The linked audio was empty.")
 
         return SavedUpload(
             path=destination,
@@ -202,6 +271,42 @@ def sanitize_file_name(file_name: str) -> str:
     safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", base_name)
     safe_name = safe_name.strip("._")
     return safe_name or "track"
+
+
+def _safe_remote_file_name(file_name: str | None, url_path: str) -> str:
+    raw_name = file_name or Path(unquote(url_path)).name or "linked-audio.mp3"
+    safe_name = sanitize_file_name(raw_name)
+    suffix = Path(safe_name).suffix.lower()
+    if not suffix:
+        return f"{safe_name}.mp3"
+    return safe_name
+
+
+def _name_from_response(response: httpx.Response, fallback_path: str) -> str:
+    content_disposition = response.headers.get("content-disposition", "")
+    match = re.search(r'filename\*?=(?:UTF-8\'\')?"?([^";]+)', content_disposition, flags=re.IGNORECASE)
+    if match:
+        return unquote(match.group(1))
+    return Path(unquote(fallback_path)).name or "linked-audio.mp3"
+
+
+def _remote_audio_allowed(file_name: str, content_type: str, allowed_content_types: set[str]) -> bool:
+    suffix = Path(file_name).suffix.lower()
+    if suffix in {".mp3", ".wav"}:
+        return True
+    return content_type in allowed_content_types
+
+
+def _is_youtube_host(host: str | None) -> bool:
+    cleaned = (host or "").split(":")[0].lower()
+    return cleaned in {"youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com", "youtu.be"} or cleaned.endswith(
+        ".youtube.com"
+    )
+
+
+def _is_blocked_host(host: str | None) -> bool:
+    cleaned = (host or "").lower()
+    return cleaned in {"localhost", "127.0.0.1", "::1", "0.0.0.0"}
 
 
 def _is_valid_track_id(track_id: str) -> bool:

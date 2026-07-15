@@ -41,7 +41,10 @@ def test_mix_plan_creation_and_transition_timing(client, synthetic_mp3_named_upl
         assert transition["target_transition_start"] >= 0.0
         assert transition["target_transition_end"] > transition["target_transition_start"]
         assert transition["duration_seconds"] > 0
-        assert transition["sfx"] == ["noise_sweep", "impact"]
+        assert transition["sfx"][0] == "filter_sweep"
+        assert "echo_tail" in transition["sfx"]
+        assert "reverb_riser" in transition["sfx"]
+        assert "reverse_swell" in transition["sfx"]
     for placement in plan["placements"]:
         assert placement["source_end_time"] - placement["source_start_time"] <= 45
 
@@ -115,3 +118,54 @@ def test_mix_and_job_records_can_be_retrieved(client, synthetic_mp3_named_upload
     assert mix_response.json()["status"] == "completed"
     assert job_response.status_code == 200
     assert job_response.json()["status"] == "completed"
+
+
+def test_train_style_profile_from_reference_mix(client, synthetic_reference_mix_bytes):
+    response = client.post(
+        "/api/style-profiles/train",
+        data={"name": "Test Reference Style"},
+        files=[("files", ("reference-set.mp3", synthetic_reference_mix_bytes, "audio/mpeg"))],
+    )
+
+    assert response.status_code == 201
+    profile = response.json()
+    assert profile["profile_id"] == "default"
+    assert profile["name"] == "Test Reference Style"
+    assert profile["reference_count"] == 1
+    assert profile["max_play_seconds_per_track"] >= 15
+    assert profile["default_transition_bars"] in {4, 8, 12, 16}
+    assert profile["effect_intensity"] > 0
+    assert "filter_sweep" in profile["transition_effects"]
+    assert profile["transition_start_strategy"] in {"phrase_boundary_low_energy", "energy_change_cue"}
+    assert 0 <= profile["cue_point_sensitivity"] <= 1
+
+    default_response = client.get("/api/style-profiles/default")
+
+    assert default_response.status_code == 200
+    assert default_response.json()["reference_count"] == 1
+
+
+def test_mix_plan_uses_trained_style_defaults(client, synthetic_mp3_named_uploads, synthetic_reference_mix_bytes):
+    train_response = client.post(
+        "/api/style-profiles/train",
+        data={"name": "Learned Style"},
+        files=[("files", ("reference-set.mp3", synthetic_reference_mix_bytes, "audio/mpeg"))],
+    )
+    learned_max_play = train_response.json()["max_play_seconds_per_track"]
+    track_ids = _analyze_three_tracks(client, synthetic_mp3_named_uploads)
+
+    response = client.post(
+        "/api/mixes/plan",
+        json={
+            "track_ids": track_ids[:2],
+            "mix_name": "Styled Mix",
+            "auto_order": False,
+            "use_trained_style": True,
+        },
+    )
+
+    assert response.status_code == 201
+    plan = response.json()
+    assert plan["max_play_seconds_per_track"] == learned_max_play
+    for placement in plan["placements"]:
+        assert placement["source_end_time"] - placement["source_start_time"] <= learned_max_play
