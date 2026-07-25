@@ -8,131 +8,188 @@
   </head>
   <body>
     <header class="topbar">
-      <a class="brand" href="/">AI DJ</a>
+      <a class="brand" href="/" aria-label="AI DJ home">
+        <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
+        <span>AI DJ</span>
+      </a>
       <nav class="mode-nav" aria-label="Mode">
-        <a class="mode-link active" href="/">Easy Mode</a>
-        <a class="mode-link" href="/docs">Advanced Mode</a>
+        <a class="mode-link active" href="/">Easy</a>
+        <a class="mode-link" href="/docs">Advanced</a>
       </nav>
     </header>
 
     <main class="app-shell">
-      <section class="control-panel" aria-labelledby="easy-title">
+      <aside class="control-panel" aria-labelledby="easy-title">
         <div class="panel-heading">
           <p class="eyebrow">Easy Mode</p>
-          <h1 id="easy-title">Search or drop tracks, then go live</h1>
+          <h1 id="easy-title">Build the room</h1>
+          <p class="panel-copy">Add your music, set the vibe, and let the AI find the best moments.</p>
         </div>
 
-        <section class="catalog-panel" aria-labelledby="catalog-title">
+        <div class="run-actions">
+          <button id="liveMixButton" type="button" class="primary live-button" disabled>Start Live Mix</button>
+          <button id="downloadMixButton" type="button" disabled>Render Download</button>
+          <button id="transitionNowButton" type="button" disabled>Mix Next Now</button>
+          <button id="stopLiveButton" type="button" class="danger" disabled>Stop</button>
+          <button id="clearButton" type="button" class="ghost">Clear Set</button>
+        </div>
+
+        <section class="setup-section" aria-labelledby="add-music-title">
           <div class="section-head">
-            <h2 id="catalog-title">Search Music</h2>
-            <button id="loadLibraryButton" type="button" class="ghost small-button">Show Library</button>
+            <h2 id="add-music-title">1. Add music</h2>
+            <span id="fileCount" class="pill">0 added</span>
+          </div>
+          <div id="dropZone" class="drop-zone" tabindex="0">
+            <input id="fileInput" class="hidden-input" type="file" accept=".mp3,audio/mpeg" multiple />
+            <input
+              id="folderInput"
+              class="hidden-input"
+              type="file"
+              accept=".mp3,audio/mpeg"
+              webkitdirectory
+              directory
+              multiple
+            />
+            <div class="drop-copy">
+              <strong>Drop MP3s here</strong>
+              <span>Analysis and DJ research start automatically</span>
+            </div>
+            <div class="file-actions">
+              <button id="chooseFilesButton" type="button" class="primary">Add MP3s</button>
+              <button id="chooseFolderButton" type="button" class="secondary">Add Folder</button>
+            </div>
+          </div>
+          <ul id="fileList" class="file-list compact-list"></ul>
+        </section>
+
+        <section class="setup-section" aria-labelledby="library-search-title">
+          <div class="section-head">
+            <h2 id="library-search-title">Library</h2>
+            <button id="loadLibraryButton" type="button" class="ghost small-button">Show all</button>
           </div>
           <div class="search-row">
             <input
               id="catalogSearch"
               type="search"
               maxlength="120"
-              placeholder="Search saved songs, BPM, key, or filename"
+              placeholder="Search tracks, BPM, or key"
             />
-            <button id="catalogSearchButton" type="button">Search</button>
+            <button id="catalogSearchButton" type="button" class="icon-command" aria-label="Search library">Search</button>
           </div>
           <ul id="catalogResults" class="catalog-results"></ul>
         </section>
 
-        <section class="catalog-panel" aria-labelledby="training-title">
-          <div class="section-head">
-            <h2 id="training-title">DJ Style Training</h2>
-            <span id="styleStatus" class="pill">No profile</span>
+        <section class="setup-section" aria-labelledby="direction-title">
+          <h2 id="direction-title">2. Set the vibe</h2>
+          <textarea
+            id="mixDirection"
+            rows="3"
+            maxlength="240"
+            aria-label="Mix direction"
+            placeholder="Smooth house warm-up, then club energy..."
+          ></textarea>
+          <div class="toggle-grid">
+            <label class="switch-option">
+              <span>AI song order</span>
+              <input id="autoOrder" type="checkbox" checked />
+              <i aria-hidden="true"></i>
+            </label>
+            <label class="switch-option">
+              <span>DJ effects</span>
+              <input id="useSfx" type="checkbox" checked />
+              <i aria-hidden="true"></i>
+            </label>
+            <label class="switch-option">
+              <span>Trained style</span>
+              <input id="useTrainedStyle" type="checkbox" checked />
+              <i aria-hidden="true"></i>
+            </label>
           </div>
-          <input id="referenceInput" class="hidden-input" type="file" accept=".mp3,.wav,audio/mpeg,audio/wav" multiple />
-          <div class="file-actions">
-            <button id="chooseReferenceButton" type="button">Choose DJ Reference Mixes</button>
-            <button id="trainStyleButton" type="button" class="secondary" disabled>Train Style</button>
-          </div>
-          <ul id="referenceList" class="catalog-results"></ul>
         </section>
 
-        <section class="catalog-panel" aria-labelledby="import-title">
+        <section class="setup-section timing-section" aria-labelledby="timing-title">
           <div class="section-head">
-            <h2 id="import-title">Import Audio Link</h2>
+            <h2 id="timing-title">3. Song timing</h2>
+            <span id="autoTimingNote" class="timing-note">Research controlled</span>
           </div>
-          <div class="search-row">
-            <input
-              id="audioUrlInput"
-              type="url"
-              maxlength="2048"
-              placeholder="Paste direct MP3/WAV link"
-            />
-            <button id="importUrlButton" type="button">Import</button>
+          <div class="segmented-control" role="radiogroup" aria-label="Song timing">
+            <input id="timingAuto" type="radio" name="timingMode" value="auto" checked />
+            <label for="timingAuto">Auto</label>
+            <input id="timingManual" type="radio" name="timingMode" value="manual" />
+            <label for="timingManual">Manual</label>
+          </div>
+          <div class="timing-fields">
+            <label class="small-field manual-timing-field">
+              <span>Seconds per song</span>
+              <input id="playSeconds" type="number" min="30" max="1800" step="5" placeholder="90" disabled />
+            </label>
+            <label class="small-field">
+              <span>Mix minutes</span>
+              <input id="targetMinutes" type="number" min="1" max="180" step="1" placeholder="Auto" />
+            </label>
+            <label class="small-field">
+              <span>Blend seconds</span>
+              <input id="transitionSeconds" type="number" min="2" max="30" step="1" value="10" />
+            </label>
           </div>
         </section>
 
-        <div id="dropZone" class="drop-zone" tabindex="0">
-          <input id="fileInput" class="hidden-input" type="file" accept=".mp3,audio/mpeg" multiple />
-          <input
-            id="folderInput"
-            class="hidden-input"
-            type="file"
-            accept=".mp3,audio/mpeg"
-            webkitdirectory
-            directory
-            multiple
-          />
-          <div>
-            <strong>Drop MP3s or a folder here</strong>
-            <span>Then make a live or downloadable mix.</span>
+        <details class="more-tools">
+          <summary>More tools</summary>
+          <div class="more-tools-body">
+            <section class="tool-section" aria-labelledby="import-title">
+              <h2 id="import-title">Import audio link</h2>
+              <div class="search-row">
+                <input
+                  id="audioUrlInput"
+                  type="url"
+                  maxlength="2048"
+                  placeholder="Direct MP3 or WAV link"
+                />
+                <button id="importUrlButton" type="button">Import</button>
+              </div>
+            </section>
+
+            <section class="tool-section" aria-labelledby="training-title">
+              <div class="section-head">
+                <h2 id="training-title">DJ style training</h2>
+                <span id="styleStatus" class="pill">No profile</span>
+              </div>
+              <input id="referenceInput" class="hidden-input" type="file" accept=".mp3,.wav,audio/mpeg,audio/wav" multiple />
+              <div class="file-actions">
+                <button id="chooseReferenceButton" type="button">Add References</button>
+                <button id="trainStyleButton" type="button" class="secondary" disabled>Train Style</button>
+              </div>
+              <ul id="referenceList" class="catalog-results"></ul>
+            </section>
           </div>
-          <div class="file-actions">
-            <button id="chooseFilesButton" type="button">Choose MP3s</button>
-            <button id="chooseFolderButton" type="button" class="secondary">Choose Folder</button>
+        </details>
+
+      </aside>
+
+      <section class="workspace" aria-label="Live DJ workspace">
+        <section class="deck-stage" aria-labelledby="now-playing-title">
+          <div class="deck-signal">
+            <span class="live-dot"></span>
+            <span id="deckState">Deck ready</span>
           </div>
-        </div>
+          <div class="deck-content">
+            <div class="now-playing">
+              <span class="deck-label">Now playing</span>
+              <h2 id="now-playing-title">Nothing playing yet</h2>
+              <p id="nowPlayingMeta">Add at least two songs to start a live mix</p>
+            </div>
+            <div class="up-next">
+              <span class="deck-label">Up next</span>
+              <strong id="upNextTitle">Waiting for your queue</strong>
+              <span id="upNextMeta">AI will line up the set</span>
+            </div>
+          </div>
+          <div class="deck-meter" aria-hidden="true">
+            <i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i>
+          </div>
+        </section>
 
-        <label class="field-label" for="mixDirection">Mix direction</label>
-        <textarea
-          id="mixDirection"
-          rows="3"
-          maxlength="240"
-          placeholder="Example: smooth house, club energy, more hip-hop cuts, chill lounge"
-        ></textarea>
-
-        <div class="options-row">
-          <label class="check-option">
-            <input id="autoOrder" type="checkbox" checked />
-            <span>Auto order</span>
-          </label>
-          <label class="check-option">
-            <input id="useSfx" type="checkbox" checked />
-            <span>DJ transition SFX</span>
-          </label>
-          <label class="check-option">
-            <input id="useTrainedStyle" type="checkbox" checked />
-            <span>Use trained style</span>
-          </label>
-          <label class="small-field">
-            <span>Minutes</span>
-            <input id="targetMinutes" type="number" min="1" max="180" step="1" placeholder="Auto" />
-          </label>
-          <label class="small-field">
-            <span>Sec/song</span>
-            <input id="playSeconds" type="number" min="15" max="1800" step="5" value="75" />
-          </label>
-          <label class="small-field">
-            <span>Blend</span>
-            <input id="transitionSeconds" type="number" min="2" max="30" step="1" value="10" />
-          </label>
-        </div>
-
-        <div class="run-actions">
-          <button id="liveMixButton" type="button" class="primary">Make Live Mix</button>
-          <button id="transitionNowButton" type="button" disabled>Transition Now</button>
-          <button id="stopLiveButton" type="button" class="secondary" disabled>Stop Live</button>
-          <button id="downloadMixButton" type="button">Render Download</button>
-          <button id="clearButton" type="button" class="ghost">Clear</button>
-        </div>
-      </section>
-
-      <section class="results-panel" aria-label="Mix results">
         <div class="status-strip">
           <span id="statusText">Ready</span>
           <div class="progress-shell" aria-hidden="true">
@@ -140,30 +197,41 @@
           </div>
         </div>
 
-        <div class="split-grid">
-          <section class="list-panel" aria-labelledby="files-title">
-            <div class="section-head">
-              <h2 id="files-title">Selected Files</h2>
-              <span id="fileCount" class="pill">0 files</span>
+        <section class="list-panel queue-panel" aria-labelledby="queue-title">
+          <div class="section-head">
+            <div>
+              <p class="section-kicker">Your set</p>
+              <h2 id="queue-title">Live Queue</h2>
             </div>
-            <ul id="fileList" class="file-list"></ul>
-          </section>
+            <span id="queueCount" class="pill">0 queued</span>
+          </div>
+          <ul id="queueList" class="queue-list"></ul>
+        </section>
 
+        <section class="workspace-grid">
           <section class="list-panel" aria-labelledby="tracks-title">
             <div class="section-head">
-              <h2 id="tracks-title">Analyzed Tracks</h2>
+              <div>
+                <p class="section-kicker">Ready to mix</p>
+                <h2 id="tracks-title">Analyzed Library</h2>
+              </div>
               <span id="trackCount" class="pill">0 tracks</span>
             </div>
             <ul id="trackList" class="track-list"></ul>
           </section>
-        </div>
 
-        <section class="list-panel" aria-labelledby="queue-title">
-          <div class="section-head">
-            <h2 id="queue-title">Live Queue</h2>
-            <span id="queueCount" class="pill">0 queued</span>
-          </div>
-          <ul id="queueList" class="queue-list"></ul>
+          <section class="list-panel" aria-labelledby="research-title">
+            <div class="section-head">
+              <div>
+                <p class="section-kicker">AI cue sheet</p>
+                <h2 id="research-title">DJ Research</h2>
+              </div>
+              <button id="researchLibraryButton" type="button" class="ghost small-button">Refresh</button>
+            </div>
+            <div id="researchPanel" class="research-panel">
+              <p class="catalog-meta">Song timing and transition matches appear here.</p>
+            </div>
+          </section>
         </section>
 
         <section id="playerPanel" class="player-panel hidden" aria-labelledby="player-title">
@@ -173,7 +241,7 @@
           </div>
           <div id="liveNow" class="live-now hidden">
             <span class="live-dot"></span>
-            <span>Live browser mix playing</span>
+            <span>Live mix playing</span>
           </div>
           <audio id="mixPlayer" controls preload="metadata"></audio>
           <dl class="mix-meta">

@@ -21,6 +21,7 @@ def test_settings(tmp_path):
         mixes_dir=tmp_path / "mixes",
         jobs_dir=tmp_path / "jobs",
         style_profiles_dir=tmp_path / "style_profiles",
+        song_research_dir=tmp_path / "song_research",
         max_upload_size_bytes=10 * 1024 * 1024,
     )
 
@@ -29,6 +30,7 @@ def test_settings(tmp_path):
 def client(test_settings):
     from app.api.jobs import get_job_service
     from app.api.mixes import get_mix_storage
+    from app.api.tracks import get_song_research_service
     from app.api.style_profiles import get_style_profile_service
 
     def override_track_service() -> TrackService:
@@ -49,10 +51,16 @@ def client(test_settings):
 
         return StyleProfileService(test_settings)
 
+    def override_song_research_service():
+        from app.services.song_research_service import SongResearchService
+
+        return SongResearchService(test_settings)
+
     app.dependency_overrides[get_track_service] = override_track_service
     app.dependency_overrides[get_job_service] = override_job_service
     app.dependency_overrides[get_mix_storage] = override_mix_storage
     app.dependency_overrides[get_style_profile_service] = override_style_profile_service
+    app.dependency_overrides[get_song_research_service] = override_song_research_service
     with TestClient(app) as test_client:
         yield test_client
     app.dependency_overrides.clear()

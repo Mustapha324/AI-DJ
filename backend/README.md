@@ -115,24 +115,45 @@ http://127.0.0.1:8000/docs
 ## Easy Mode
 
 1. Open `http://127.0.0.1:8000/`.
-2. Search saved tracks with **Search Music**, or click **Show Library** to list analyzed tracks.
-3. Use **DJ Style Training** to choose full DJ sets as references, then click **Train Style**.
-4. Add saved tracks to the mix, import a direct MP3/WAV link, or drop MP3 files onto the page, choose multiple MP3s, or use **Choose Folder**.
+2. Click **Add MP3s**, choose a whole folder, or drag MP3 files onto the drop zone.
+3. Wait for automatic audio analysis and DJ research; imported songs are saved to the library and added to the live queue.
+4. Search the saved library by title, BPM, or key and add any other songs you want.
 5. Optional: type a direction such as `smooth house`, `club energy`, `more hip-hop cuts`, or `chill lounge`.
-6. Use the **Live Queue** to drag songs into order.
-7. Click **Play Next** on a queued song to put it after the currently playing track.
-8. Leave **Sec/song** and **Blend** alone when you want AI to use the trained profile; changing either field becomes a manual override.
-9. Keep **Use trained style** on to apply the learned DJ reference profile.
-11. Keep **Auto order** on for rendered mixes unless you want the selected order.
-12. Keep **DJ transition SFX** on for filter sweeps, echo tails, risers, loop rolls, and downbeat impacts.
-13. Click **Make Live Mix** to let AI analyze, line up, and start the live browser deck. Use **Transition Now** to force the next blend.
-14. Click **Render Download** when you only want the final WAV output.
+6. Keep song timing on **Auto** to use a different researched play window for every song. Auto timing keeps the detected hype section before the outgoing blend.
+7. Switch song timing to **Manual** only when you want to set the same seconds-per-song cap yourself. Leave **Mix minutes** empty for an automatic total length.
+8. Use the **Live Queue** to drag songs into order, or click **Play Next** to cue a song after the current track.
+9. Keep **Trained style**, **AI song order**, and **DJ effects** on for the full automatic mix.
+10. Use **DJ Research** to inspect each song's auto play window, hype point, mix-in/mix-out cues, and transition matches.
+11. Click **Start Live Mix** to line up and start the browser deck. Use **Mix Next Now** to force the next blend.
+12. Click **Render Download** when you only want the final WAV output.
 
 Folder selection uses browser folder-upload support. Dragging a whole folder also works in browsers that expose dropped folder entries, such as current Chromium-based browsers.
 
 Online song search is not wired to a commercial music provider yet. The link importer accepts direct MP3/WAV links from sources you are authorized to download. YouTube-to-MP3 ripping is intentionally blocked; to use YouTube content, use official YouTube download features, your own exported content, or a licensed source with rights-holder permission.
 
 Full DJ mixes can be used as reference audio. The app analyzes them for transition spacing, average excerpt length, phrase timing, phrase-boundary strength, energy-change behavior, spectral motion, SFX density, effect intensity, cue-point sensitivity, and preferred transition effects. Reference mixes are not added to the song library or live queue.
+
+## DJ Research
+
+The research endpoints turn analyzed songs into DJ-ready metadata:
+
+- likely mix-in cue points near clean phrase starts
+- likely mix-out cue points near phrase-safe exits, lower-energy moments, or energy changes
+- a per-song automatic play window with an entry point, detected hype point, and phrase-safe exit
+- local song pairings with suggested styles such as long EQ blend, bass swap, echo cut, drop swap, or quick cut
+- notes for future public metadata evidence, without downloading copyrighted audio
+
+Research is generated automatically when a local MP3 or authorized direct audio link is imported. `GET /api/tracks/research` rebuilds the entire library when all transition pairings need to be refreshed.
+
+Use:
+
+```text
+GET /api/tracks/{track_id}/research
+GET /api/tracks/research
+GET /api/tracks/music-sources
+```
+
+For wider song background intelligence, use legal metadata/evidence sources such as MusicBrainz, ListenBrainz, Mixcloud tracklists, Beatport metadata with approved access, licensed tracklists, or user-provided cue sheets. Do not scrape or download copyrighted audio.
 
 ## Swagger: Upload Multiple Songs
 

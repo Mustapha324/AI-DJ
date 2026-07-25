@@ -122,6 +122,41 @@ def test_batch_upload_detects_duplicates(client, make_synthetic_wav_bytes):
     assert payload["tracks"][0]["track_id"] == payload["tracks"][1]["track_id"]
 
 
+def test_single_upload_does_not_duplicate_existing_library_track(client, make_synthetic_wav_bytes, test_settings):
+    audio = make_synthetic_wav_bytes(440.0)
+    first_response = client.post(
+        "/api/tracks/analyze",
+        files={"file": ("original.mp3", audio, "audio/mpeg")},
+    )
+    duplicate_response = client.post(
+        "/api/tracks/analyze",
+        files={"file": ("renamed-copy.mp3", audio, "audio/mpeg")},
+    )
+
+    assert first_response.status_code == 201
+    assert duplicate_response.status_code == 201
+    assert duplicate_response.json()["track_id"] == first_response.json()["track_id"]
+    assert len(client.get("/api/tracks").json()) == 1
+    assert len(list(test_settings.uploads_dir.glob("*"))) == 1
+
+
+def test_batch_upload_detects_same_audio_with_different_file_bytes(client, make_synthetic_wav_bytes):
+    audio = make_synthetic_wav_bytes(440.0)
+    response = client.post(
+        "/api/tracks/analyze-batch",
+        files=[
+            ("files", ("club-track.mp3", audio, "audio/mpeg")),
+            ("files", ("club-track-copy.mp3", audio + b"\x00\x00metadata-padding", "audio/mpeg")),
+        ],
+    )
+
+    assert response.status_code == 201
+    payload = response.json()
+    assert payload["successful"] == 1
+    assert payload["duplicates"] == 1
+    assert payload["tracks"][0]["track_id"] == payload["tracks"][1]["track_id"]
+
+
 def test_batch_upload_rejects_unsupported_format(client, synthetic_wav_bytes):
     response = client.post(
         "/api/tracks/analyze-batch",
@@ -173,6 +208,48 @@ def test_search_tracks_returns_saved_library_matches(client, synthetic_mp3_named
     results = response.json()
     assert len(results) == 1
     assert results[0]["file_name"] == "alpha.mp3"
+
+
+def test_song_research_returns_cues_and_pairings(client, synthetic_mp3_named_uploads):
+    upload_response = client.post(
+        "/api/tracks/analyze-batch",
+        files=[("files", upload) for upload in synthetic_mp3_named_uploads],
+    )
+    track_id = upload_response.json()["tracks"][0]["track_id"]
+
+    response = client.get(f"/api/tracks/{track_id}/research")
+
+    assert response.status_code == 200
+    research = response.json()
+    assert research["track_id"] == track_id
+    assert research["mix_in_cues"]
+    assert research["mix_out_cues"]
+    assert research["recommended_transitions"]
+    assert research["external_notes"]
+    assert research["play_window"]["start_seconds"] <= research["play_window"]["peak_seconds"]
+    assert research["play_window"]["peak_seconds"] <= research["play_window"]["end_seconds"]
+    assert research["play_window"]["play_seconds"] > 0
+
+
+def test_batch_import_automatically_saves_song_research(client, synthetic_mp3_named_uploads, test_settings):
+    response = client.post(
+        "/api/tracks/analyze-batch",
+        files=[("files", synthetic_mp3_named_uploads[0])],
+    )
+
+    assert response.status_code == 201
+    track_id = response.json()["tracks"][0]["track_id"]
+    research_path = test_settings.song_research_dir / f"{track_id}.json"
+    assert research_path.exists()
+
+
+def test_legal_music_sources_endpoint(client):
+    response = client.get("/api/tracks/music-sources")
+
+    assert response.status_code == 200
+    sources = response.json()
+    assert sources
+    assert any(source["name"] == "Jamendo" for source in sources)
 
 
 def test_saved_track_audio_can_be_retrieved(client, synthetic_mp3_named_uploads):

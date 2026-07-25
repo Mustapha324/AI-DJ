@@ -18,6 +18,7 @@ backend/analysis_output/*
 backend/mixes/*
 backend/jobs/*
 backend/style_profiles/*
+backend/song_research/*
 output/*
 music/*
 
@@ -27,6 +28,7 @@ music/*
 !backend/mixes/.gitkeep
 !backend/jobs/.gitkeep
 !backend/style_profiles/.gitkeep
+!backend/song_research/.gitkeep
 !output/.gitkeep
 !music/.gitkeep
 

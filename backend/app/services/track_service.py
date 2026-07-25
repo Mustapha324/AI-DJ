@@ -175,26 +175,20 @@ class TrackService:
         return destination
 
     def list_tracks(self) -> list[TrackSummary]:
-        tracks: list[TrackSummary] = []
-        for analysis_file in sorted(self.settings.analysis_output_dir.glob("*.json")):
-            try:
-                analysis = self._load_analysis_file(analysis_file)
-            except (OSError, json.JSONDecodeError, ValueError):
-                continue
-            tracks.append(
-                TrackSummary(
-                    track_id=analysis.track_id,
-                    title=analysis.title,
-                    file_name=analysis.file_name,
-                    duration_seconds=analysis.duration_seconds,
-                    estimated_bpm=analysis.estimated_bpm,
-                    key=analysis.key,
-                    beat_count=analysis.beats.beat_count,
-                    approximate_bar_count=len(analysis.beats.approximate_bars),
-                    overall_rms_energy=analysis.overall_rms_energy,
-                )
+        return [
+            TrackSummary(
+                track_id=analysis.track_id,
+                title=analysis.title,
+                file_name=analysis.file_name,
+                duration_seconds=analysis.duration_seconds,
+                estimated_bpm=analysis.estimated_bpm,
+                key=analysis.key,
+                beat_count=analysis.beats.beat_count,
+                approximate_bar_count=len(analysis.beats.approximate_bars),
+                overall_rms_energy=analysis.overall_rms_energy,
             )
-        return tracks
+            for analysis in self.list_analyses()
+        ]
 
     def search_tracks(self, query: str | None = None) -> list[TrackSummary]:
         tracks = self.list_tracks()
@@ -220,17 +214,33 @@ class TrackService:
         return [track for track in tracks if matches(track)]
 
     def list_analyses(self) -> list[TrackAnalysis]:
-        tracks: list[TrackAnalysis] = []
+        unique_tracks: list[TrackAnalysis] = []
+        seen_hashes: set[str] = set()
         for analysis_file in sorted(self.settings.analysis_output_dir.glob("*.json")):
             try:
-                tracks.append(self._load_analysis_file(analysis_file))
+                analysis = self._load_analysis_file(analysis_file)
             except (OSError, json.JSONDecodeError, ValueError):
                 continue
-        return tracks
+
+            if analysis.content_hash and analysis.content_hash in seen_hashes:
+                continue
+            if any(analyses_represent_same_song(saved, analysis) for saved in unique_tracks):
+                continue
+
+            unique_tracks.append(analysis)
+            if analysis.content_hash:
+                seen_hashes.add(analysis.content_hash)
+        return unique_tracks
 
     def find_duplicate_by_hash(self, content_hash: str) -> TrackAnalysis | None:
         for analysis in self.list_analyses():
             if analysis.content_hash and analysis.content_hash == content_hash:
+                return analysis
+        return None
+
+    def find_duplicate_by_analysis(self, candidate: TrackAnalysis) -> TrackAnalysis | None:
+        for analysis in self.list_analyses():
+            if analyses_represent_same_song(analysis, candidate):
                 return analysis
         return None
 
@@ -264,6 +274,79 @@ class TrackService:
         with path.open("r", encoding="utf-8") as input_file:
             data = json.load(input_file)
         return TrackAnalysis.model_validate(data)
+
+
+def analyses_represent_same_song(left: TrackAnalysis, right: TrackAnalysis) -> bool:
+    if left.track_id == right.track_id:
+        return True
+
+    duration_difference = abs(left.duration_seconds - right.duration_seconds)
+    if duration_difference > 2.0:
+        return False
+
+    title_matches = _normalized_song_title(left) == _normalized_song_title(right)
+    chroma_similarity = _chroma_similarity(left, right)
+    energy_difference = _energy_curve_difference(left, right)
+    tempo_difference = _tempo_difference(left, right)
+
+    if title_matches:
+        return chroma_similarity >= 0.99 and energy_difference <= 0.06 and tempo_difference <= 2.0
+
+    return (
+        duration_difference <= 0.75
+        and chroma_similarity >= 0.999
+        and energy_difference <= 0.025
+        and tempo_difference <= 0.75
+    )
+
+
+def _normalized_song_title(track: TrackAnalysis) -> str:
+    stem = Path(track.file_name).stem.lower()
+    stem = re.sub(r"(?:[_\s.-]+(?:copy|duplicate))(?:[_\s.-]*\d+)?$", "", stem)
+    if re.search(r"_\d+_$", stem):
+        stem = re.sub(r"_\d+_$", "", stem)
+    normalized = re.sub(r"[^a-z0-9]+", " ", stem).strip()
+    return normalized or re.sub(r"[^a-z0-9]+", " ", track.title.lower()).strip()
+
+
+def _chroma_similarity(left: TrackAnalysis, right: TrackAnalysis) -> float:
+    pitches = sorted(set(left.chroma_features) | set(right.chroma_features))
+    left_values = [float(left.chroma_features.get(pitch, 0.0)) for pitch in pitches]
+    right_values = [float(right.chroma_features.get(pitch, 0.0)) for pitch in pitches]
+    dot_product = sum(a * b for a, b in zip(left_values, right_values, strict=True))
+    left_norm = sum(value * value for value in left_values) ** 0.5
+    right_norm = sum(value * value for value in right_values) ** 0.5
+    if left_norm == 0 or right_norm == 0:
+        return 0.0
+    return dot_product / (left_norm * right_norm)
+
+
+def _energy_curve_difference(left: TrackAnalysis, right: TrackAnalysis, samples: int = 24) -> float:
+    if not left.energy_curve or not right.energy_curve:
+        return 1.0
+
+    left_values = _sample_energy_curve(left, samples)
+    right_values = _sample_energy_curve(right, samples)
+    return sum(
+        abs(a - b)
+        for a, b in zip(left_values, right_values, strict=True)
+    ) / samples
+
+
+def _sample_energy_curve(track: TrackAnalysis, samples: int) -> list[float]:
+    points = track.energy_curve
+    if len(points) == 1:
+        return [points[0].energy] * samples
+    return [
+        points[round(index * (len(points) - 1) / max(samples - 1, 1))].energy
+        for index in range(samples)
+    ]
+
+
+def _tempo_difference(left: TrackAnalysis, right: TrackAnalysis) -> float:
+    if left.estimated_bpm is None or right.estimated_bpm is None:
+        return 0.0
+    return abs(left.estimated_bpm - right.estimated_bpm)
 
 
 def sanitize_file_name(file_name: str) -> str:

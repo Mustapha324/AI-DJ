@@ -76,6 +76,18 @@ class BatchAnalyzer:
                 )
                 analysis.content_hash = saved_upload.content_hash
                 analysis.file_size_bytes = saved_upload.size_bytes
+                duplicate = self.track_service.find_duplicate_by_analysis(analysis)
+                if duplicate:
+                    saved_upload.path.unlink(missing_ok=True)
+                    tracks.append(
+                        BatchTrackResult(
+                            track_id=duplicate.track_id,
+                            file_name=duplicate.file_name,
+                            status="duplicate",
+                        )
+                    )
+                    continue
+
                 self.track_service.save_analysis(analysis)
                 tracks.append(
                     BatchTrackResult(

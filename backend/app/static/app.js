@@ -1,13 +1,14 @@
 const selectedFiles = new Map();
 const selectedLibraryTracks = new Map();
 const analyzedTracks = new Map();
+const trackResearch = new Map();
 const liveQueue = [];
 const referenceMixes = new Map();
 
 let liveSession = null;
 let draggedQueueId = null;
-let playSecondsTouched = false;
 let blendSecondsTouched = false;
+let appBusy = false;
 
 const els = {
   dropZone: document.getElementById("dropZone"),
@@ -31,6 +32,8 @@ const els = {
   catalogResults: document.getElementById("catalogResults"),
   audioUrlInput: document.getElementById("audioUrlInput"),
   importUrlButton: document.getElementById("importUrlButton"),
+  researchLibraryButton: document.getElementById("researchLibraryButton"),
+  researchPanel: document.getElementById("researchPanel"),
   mixDirection: document.getElementById("mixDirection"),
   autoOrder: document.getElementById("autoOrder"),
   useSfx: document.getElementById("useSfx"),
@@ -38,6 +41,9 @@ const els = {
   targetMinutes: document.getElementById("targetMinutes"),
   playSeconds: document.getElementById("playSeconds"),
   transitionSeconds: document.getElementById("transitionSeconds"),
+  timingAuto: document.getElementById("timingAuto"),
+  timingManual: document.getElementById("timingManual"),
+  autoTimingNote: document.getElementById("autoTimingNote"),
   fileList: document.getElementById("fileList"),
   trackList: document.getElementById("trackList"),
   queueList: document.getElementById("queueList"),
@@ -55,6 +61,12 @@ const els = {
   mixStatus: document.getElementById("mixStatus"),
   errorPanel: document.getElementById("errorPanel"),
   errorList: document.getElementById("errorList"),
+  deckStage: document.querySelector(".deck-stage"),
+  deckState: document.getElementById("deckState"),
+  nowPlayingTitle: document.getElementById("now-playing-title"),
+  nowPlayingMeta: document.getElementById("nowPlayingMeta"),
+  upNextTitle: document.getElementById("upNextTitle"),
+  upNextMeta: document.getElementById("upNextMeta"),
 };
 
 els.chooseFilesButton.addEventListener("click", () => els.fileInput.click());
@@ -69,6 +81,7 @@ els.trainStyleButton.addEventListener("click", trainDJStyle);
 els.loadLibraryButton.addEventListener("click", () => searchCatalog(""));
 els.catalogSearchButton.addEventListener("click", () => searchCatalog(els.catalogSearch.value));
 els.importUrlButton.addEventListener("click", importAudioUrl);
+els.researchLibraryButton.addEventListener("click", researchLibrary);
 els.catalogSearch.addEventListener("keydown", (event) => {
   if (event.key === "Enter") {
     event.preventDefault();
@@ -81,26 +94,25 @@ els.audioUrlInput.addEventListener("keydown", (event) => {
     importAudioUrl();
   }
 });
-els.playSeconds.addEventListener("input", () => {
-  playSecondsTouched = true;
-});
+els.timingAuto.addEventListener("change", updateTimingMode);
+els.timingManual.addEventListener("change", updateTimingMode);
+els.playSeconds.addEventListener("input", updateTimingMode);
 els.transitionSeconds.addEventListener("input", () => {
   blendSecondsTouched = true;
 });
 els.useTrainedStyle.addEventListener("change", () => {
   if (els.useTrainedStyle.checked) {
-    playSecondsTouched = false;
     blendSecondsTouched = false;
   }
 });
 
-els.fileInput.addEventListener("change", () => {
-  addFiles(Array.from(els.fileInput.files || []));
+els.fileInput.addEventListener("change", async () => {
+  await addFiles(Array.from(els.fileInput.files || []));
   els.fileInput.value = "";
 });
 
-els.folderInput.addEventListener("change", () => {
-  addFiles(Array.from(els.folderInput.files || []));
+els.folderInput.addEventListener("change", async () => {
+  await addFiles(Array.from(els.folderInput.files || []));
   els.folderInput.value = "";
 });
 
@@ -126,7 +138,7 @@ els.referenceInput.addEventListener("change", () => {
 els.dropZone.addEventListener("drop", async (event) => {
   setStatus("Reading dropped files", 8);
   const files = await filesFromDrop(event.dataTransfer);
-  addFiles(files);
+  await addFiles(files);
 });
 
 els.dropZone.addEventListener("keydown", (event) => {
@@ -136,23 +148,86 @@ els.dropZone.addEventListener("keydown", (event) => {
   }
 });
 
-function addFiles(files) {
+async function addFiles(files) {
   const mp3s = files.filter((file) => file.name.toLowerCase().endsWith(".mp3"));
+  if (!mp3s.length) {
+    setStatus("No MP3 files found", 0);
+    return;
+  }
+
+  const newMp3s = [];
+  let localDuplicates = 0;
   for (const file of mp3s) {
     const key = fileKey(file);
+    if (selectedFiles.has(key)) {
+      localDuplicates += 1;
+      continue;
+    }
     selectedFiles.set(key, file);
-    ensureQueueItem({
-      id: `file:${key}`,
-      type: "file",
-      key,
-      name: file.webkitRelativePath || file.name,
-      meta: formatBytes(file.size),
-    });
+    newMp3s.push(file);
   }
   renderFiles();
-  renderQueue();
   clearErrors();
-  setStatus(mp3s.length ? "Files ready" : "No MP3 files found", mp3s.length ? 16 : 0);
+
+  if (!newMp3s.length) {
+    setStatus(`${localDuplicates} duplicate song${localDuplicates === 1 ? "" : "s"} skipped`, 100);
+    return;
+  }
+
+  try {
+    toggleBusy(true);
+    setStatus(`Analyzing ${newMp3s.length} song${newMp3s.length === 1 ? "" : "s"}`, 24);
+    const batch = await analyzeFiles(newMp3s);
+    showErrors(batch.errors || []);
+    const trackIds = unique((batch.tracks || []).map((track) => track.track_id).filter(Boolean));
+    const tracks = await Promise.all(trackIds.map(fetchTrack));
+
+    for (const track of tracks) {
+      selectedLibraryTracks.set(track.track_id, track);
+      analyzedTracks.set(track.track_id, track);
+      ensureQueueItem({
+        id: `track:${track.track_id}`,
+        type: "track",
+        trackId: track.track_id,
+        name: track.title || track.file_name,
+        meta: `${formatBpm(track.estimated_bpm)} - ${track.key?.display_name || "Unknown key"}`,
+      });
+    }
+
+    setStatus("Building DJ cue research", 68);
+    const researchRecords = await Promise.all(
+      trackIds.map((trackId) => fetchJson(`/api/tracks/${encodeURIComponent(trackId)}/research`)),
+    );
+    for (const research of researchRecords) {
+      trackResearch.set(research.track_id, research);
+    }
+
+    renderTracks();
+    renderQueue();
+    if (researchRecords.length === 1) {
+      renderTrackResearch(researchRecords[0]);
+    } else if (researchRecords.length > 1) {
+      renderLibraryResearch(researchRecords);
+    }
+    clearErrors();
+    const duplicateCount = localDuplicates + Number(batch.duplicates || 0);
+    const duplicateNote = duplicateCount
+      ? ` - ${duplicateCount} duplicate${duplicateCount === 1 ? "" : "s"} skipped`
+      : "";
+    setStatus(
+      trackIds.length
+        ? `${trackIds.length} unique song${trackIds.length === 1 ? "" : "s"} ready${duplicateNote}`
+        : duplicateCount
+          ? `${duplicateCount} duplicate${duplicateCount === 1 ? "" : "s"} skipped`
+          : "No songs added",
+      trackIds.length ? 100 : 0,
+    );
+  } catch (error) {
+    showErrors([{ file_name: "Music import", error: error.message || "Could not analyze these MP3 files." }]);
+    setStatus("Import stopped", 0);
+  } finally {
+    toggleBusy(false);
+  }
 }
 
 function addReferenceMixes(files) {
@@ -227,6 +302,15 @@ async function searchCatalog(query) {
     setStatus(results.length ? "Library results ready" : "No saved matches", results.length ? 20 : 0);
   } catch (error) {
     showErrors([{ file_name: "Search", error: error.message || "Library search failed." }]);
+  }
+}
+
+async function loadInitialLibrary() {
+  try {
+    const results = await fetchJson("/api/tracks/search");
+    renderCatalogResults(results);
+  } catch {
+    renderCatalogResults([]);
   }
 }
 
@@ -335,12 +419,14 @@ async function loadStyleStatus() {
 
 function updateStyleStatus(profile) {
   const intensity = Math.round((profile.effect_intensity || profile.sfx_density || 0) * 100);
-  els.styleStatus.textContent = `${profile.reference_count} refs / ${Math.round(profile.max_play_seconds_per_track)}s / FX ${intensity}%`;
-  els.playSeconds.value = Math.round(profile.max_play_seconds_per_track);
-  els.transitionSeconds.value = Math.round(profile.transition_duration_seconds);
+  els.styleStatus.textContent = `${profile.reference_count} refs / FX ${intensity}%`;
+  if (!blendSecondsTouched) {
+    els.transitionSeconds.value = Math.round(profile.transition_duration_seconds);
+  }
 }
 
 function addLibraryTrack(track, catalogResults) {
+  const alreadyQueued = liveQueue.some((queued) => queued.id === `track:${track.track_id}`);
   selectedLibraryTracks.set(track.track_id, track);
   ensureQueueItem({
     id: `track:${track.track_id}`,
@@ -352,7 +438,8 @@ function addLibraryTrack(track, catalogResults) {
   renderTracks();
   renderQueue();
   renderCatalogResults(catalogResults);
-  setStatus("Track added to queue", 24);
+  setStatus(alreadyQueued ? "Song already queued - duplicate skipped" : "Track added to queue", 24);
+  researchTrack(track.track_id);
 }
 
 async function importAudioUrl() {
@@ -380,6 +467,7 @@ async function importAudioUrl() {
       body: JSON.stringify({ url }),
     });
     selectedLibraryTracks.set(track.track_id, track);
+    analyzedTracks.set(track.track_id, track);
     ensureQueueItem({
       id: `track:${track.track_id}`,
       type: "track",
@@ -390,8 +478,12 @@ async function importAudioUrl() {
     els.audioUrlInput.value = "";
     renderTracks();
     renderQueue();
+    const research = await fetchJson(`/api/tracks/${encodeURIComponent(track.track_id)}/research`);
+    trackResearch.set(track.track_id, research);
+    renderTracks();
+    renderTrackResearch(research);
     clearErrors();
-    setStatus("Audio link added", 35);
+    setStatus("Audio link researched and ready", 100);
   } catch (error) {
     showErrors([{ file_name: "Audio link", error: error.message || "Could not import this link." }]);
     setStatus("Import failed", 0);
@@ -417,11 +509,11 @@ function ensureQueueItem(item) {
 
 function renderFiles() {
   const files = Array.from(selectedFiles.values());
-  els.fileCount.textContent = `${files.length} file${files.length === 1 ? "" : "s"}`;
+  els.fileCount.textContent = `${files.length} added`;
   els.fileList.innerHTML = "";
 
   if (!files.length) {
-    els.fileList.appendChild(emptyItem("No files selected yet."));
+    els.fileList.appendChild(emptyItem("No recent imports."));
     return;
   }
 
@@ -441,6 +533,8 @@ function renderTracks() {
   els.trackList.innerHTML = "";
 
   for (const track of tracks) {
+    const research = trackResearch.get(track.track_id);
+    const playWindow = research?.play_window;
     const item = document.createElement("li");
     item.className = "track-item";
     item.innerHTML = `
@@ -450,8 +544,17 @@ function renderTracks() {
         <span>${escapeHtml(track.key?.display_name || "Unknown key")}</span>
         <span>${formatDuration(track.duration_seconds)}</span>
         <span>Energy ${formatEnergy(track.overall_rms_energy)}</span>
+        ${
+          playWindow
+            ? `<span class="track-timing">Auto ${formatDuration(playWindow.play_seconds)} - hype ${formatTime(playWindow.peak_seconds)}</span>`
+            : `<span>Researching</span>`
+        }
+      </div>
+      <div class="queue-actions">
+        <button type="button" data-action="research">Research</button>
       </div>
     `;
+    item.querySelector('[data-action="research"]').addEventListener("click", () => researchTrack(track.track_id));
     els.trackList.appendChild(item);
   }
 
@@ -461,22 +564,148 @@ function renderTracks() {
   }
 }
 
+async function researchTrack(trackId, showPanel = true) {
+  if (!trackId) {
+    return;
+  }
+  try {
+    if (showPanel) {
+      setStatus("Researching track", 28);
+    }
+    const research = await fetchJson(`/api/tracks/${encodeURIComponent(trackId)}/research`);
+    trackResearch.set(trackId, research);
+    renderTracks();
+    if (showPanel) {
+      renderTrackResearch(research);
+      setStatus("Track research ready", 42);
+    }
+  } catch (error) {
+    showErrors([{ file_name: "DJ Research", error: error.message || "Could not research this track." }]);
+  }
+}
+
+async function researchLibrary() {
+  try {
+    setStatus("Researching library", 28);
+    const research = await fetchJson("/api/tracks/research");
+    for (const record of research) {
+      trackResearch.set(record.track_id, record);
+    }
+    renderTracks();
+    renderLibraryResearch(research);
+    setStatus(research.length ? "Library research ready" : "No tracks to research", research.length ? 42 : 0);
+  } catch (error) {
+    showErrors([{ file_name: "DJ Research", error: error.message || "Could not research the library." }]);
+  }
+}
+
+function renderTrackResearch(research) {
+  const transitions = research.recommended_transitions || [];
+  const playWindow = research.play_window || null;
+  els.researchPanel.innerHTML = `
+    <div class="research-card">
+      <strong>${escapeHtml(research.title || research.file_name)}</strong>
+      <div class="catalog-meta">${formatBpm(research.bpm)} - ${escapeHtml(research.key)} - ${escapeHtml((research.likely_genres || []).join(", "))}</div>
+    </div>
+    ${
+      playWindow
+        ? `
+          <div class="research-card featured">
+            <strong>Auto play ${formatDuration(playWindow.play_seconds)}</strong>
+            <div class="catalog-meta">Start ${formatTime(playWindow.start_seconds)} - hype ${formatTime(playWindow.peak_seconds)} - mix out ${formatTime(playWindow.end_seconds)}</div>
+            <div class="catalog-meta">${escapeHtml(playWindow.reason)}</div>
+          </div>
+        `
+        : ""
+    }
+    <div class="research-grid">
+      ${renderCueBlock("Mix in", research.mix_in_cues || [])}
+      ${renderCueBlock("Mix out", research.mix_out_cues || [])}
+    </div>
+    <ul class="catalog-results research-results">
+      ${
+        transitions.length
+          ? transitions
+              .map(
+                (transition) => `
+                  <li class="catalog-item">
+                    <div>
+                      <strong>${escapeHtml(transition.target_title || transition.target_file_name)}</strong>
+                      <div class="catalog-meta">${escapeHtml(transition.suggested_style)} - ${Math.round(transition.compatibility_score * 100)}%</div>
+                      <div class="catalog-meta">${escapeHtml(transition.expected_sound)}</div>
+                      <div class="catalog-meta">Out ${formatTime(transition.source_cue_seconds)} -> In ${formatTime(transition.target_cue_seconds)}</div>
+                    </div>
+                  </li>
+                `,
+              )
+              .join("")
+          : `<li class="catalog-item"><div><strong>No transition matches yet</strong><div class="catalog-meta">Add more analyzed tracks to build pairings.</div></div></li>`
+      }
+    </ul>
+  `;
+}
+
+function renderLibraryResearch(records) {
+  els.researchPanel.innerHTML = `
+    <ul class="catalog-results research-results">
+      ${
+        records.length
+          ? records
+              .map(
+                (record) => `
+                  <li class="catalog-item">
+                    <div>
+                      <strong>${escapeHtml(record.title || record.file_name)}</strong>
+                      <div class="catalog-meta">${(record.mix_out_cues || []).length} exits - ${(record.recommended_transitions || []).length} matches</div>
+                    </div>
+                    <button type="button" class="small-button" data-track-id="${escapeHtml(record.track_id)}">View</button>
+                  </li>
+                `,
+              )
+              .join("")
+          : `<li class="catalog-item"><div><strong>No analyzed tracks yet</strong></div></li>`
+      }
+    </ul>
+  `;
+  for (const button of els.researchPanel.querySelectorAll("[data-track-id]")) {
+    button.addEventListener("click", () => researchTrack(button.dataset.trackId));
+  }
+}
+
+function renderCueBlock(title, cues) {
+  const cueText = cues.length
+    ? cues
+        .slice(0, 3)
+        .map((cue) => `${formatTime(cue.time_seconds)} (${Math.round(cue.confidence * 100)}%)`)
+        .join(", ")
+    : "No cue found";
+  return `
+    <div class="research-card">
+      <strong>${escapeHtml(title)}</strong>
+      <div class="catalog-meta">${escapeHtml(cueText)}</div>
+    </div>
+  `;
+}
+
 function renderQueue() {
   els.queueList.innerHTML = "";
   els.queueCount.textContent = `${liveQueue.length} queued`;
+  syncActionAvailability();
 
   if (!liveQueue.length) {
     els.queueList.appendChild(emptyItem("Drop tracks or add saved songs to build the live queue."));
+    updateDeckDisplay();
     return;
   }
 
   const currentId = liveSession?.currentItemId || null;
-  for (const item of liveQueue) {
+  for (const [index, item] of liveQueue.entries()) {
     const row = document.createElement("li");
     row.className = `queue-item${item.id === currentId ? " current" : ""}`;
     row.draggable = true;
     row.dataset.queueId = item.id;
     row.innerHTML = `
+      <span class="queue-number">${String(index + 1).padStart(2, "0")}</span>
       <div>
         <strong>${escapeHtml(item.name)}</strong>
         <div class="queue-meta">${escapeHtml(item.meta || item.type)}</div>
@@ -494,6 +723,23 @@ function renderQueue() {
     row.querySelector('[data-action="remove"]').addEventListener("click", () => removeQueueItem(item.id));
     els.queueList.appendChild(row);
   }
+  updateDeckDisplay();
+}
+
+function updateDeckDisplay() {
+  const currentIndex = liveQueue.findIndex((item) => item.id === liveSession?.currentItemId);
+  const isLive = Boolean(liveSession?.playing && currentIndex >= 0);
+  const current = isLive ? liveQueue[currentIndex] : null;
+  const next = isLive ? liveQueue[currentIndex + 1] : liveQueue[0];
+
+  els.deckStage.classList.toggle("is-live", isLive);
+  els.deckState.textContent = isLive ? "Live on air" : liveQueue.length ? "Set ready" : "Deck ready";
+  els.nowPlayingTitle.textContent = current?.name || (liveQueue.length ? "Ready when you are" : "Nothing playing yet");
+  els.nowPlayingMeta.textContent = current?.meta || (
+    liveQueue.length ? `${liveQueue.length} songs lined up` : "Add at least two songs to start a live mix"
+  );
+  els.upNextTitle.textContent = next?.name || "Waiting for your queue";
+  els.upNextMeta.textContent = next?.meta || "AI will line up the set";
 }
 
 function handleQueueDragStart(event) {
@@ -704,6 +950,14 @@ function queueOrderedByPlan(plan, fileTrackIdsByQueueId, tracks) {
 function applyPlanToLiveControls(plan) {
   if (plan.max_play_seconds_per_track) {
     els.playSeconds.value = Math.round(plan.max_play_seconds_per_track);
+    els.autoTimingNote.textContent = `${Math.round(plan.max_play_seconds_per_track)} sec manual`;
+  } else if (plan.placements?.length) {
+    const windows = plan.placements.map(
+      (placement) => placement.source_end_time - placement.source_start_time,
+    );
+    const shortest = Math.round(Math.min(...windows));
+    const longest = Math.round(Math.max(...windows));
+    els.autoTimingNote.textContent = shortest === longest ? `${shortest} sec AI pick` : `${shortest}-${longest} sec AI picks`;
   }
   if (plan.transitions?.length) {
     const averageTransition =
@@ -738,7 +992,7 @@ async function startBrowserLiveMix(queueItems, plan = null) {
     playing: false,
     transitioning: false,
     plan,
-    segmentSeconds: numericValue(els.playSeconds, 75),
+    segmentSeconds: numericValue(els.playSeconds, 90),
     transitionSeconds: numericValue(els.transitionSeconds, 10),
     withSfx: els.useSfx.checked,
   };
@@ -861,9 +1115,9 @@ function liveTrackStartOffset(track) {
 
 function livePreTransitionWindow(track, transitionSeconds) {
   const available = Math.max(1, track.buffer.duration - liveTrackStartOffset(track));
-  const controlSeconds = Math.max(15, numericValue(els.playSeconds, liveSession?.segmentSeconds || 75));
+  const controlSeconds = Math.max(30, numericValue(els.playSeconds, liveSession?.segmentSeconds || 90));
   const plannedSeconds =
-    !playSecondsTouched && Number.isFinite(track.plannedWindow)
+    els.timingAuto.checked && Number.isFinite(track.plannedWindow)
       ? Math.max(4, track.plannedWindow - transitionSeconds)
       : null;
   const preferred = plannedSeconds || controlSeconds;
@@ -1244,8 +1498,8 @@ async function fetchTrack(trackId) {
 
 async function createPlan(trackIds) {
   const targetMinutes = Number.parseFloat(els.targetMinutes.value);
-  const playSeconds = numericValue(els.playSeconds, 75);
-  const useAiTiming = els.useTrainedStyle.checked && !playSecondsTouched;
+  const playSeconds = numericValue(els.playSeconds, 90);
+  const useAiTiming = els.timingAuto.checked;
   const body = {
     track_ids: trackIds,
     mix_name: `Easy Mix ${new Date().toLocaleString()}`,
@@ -1349,10 +1603,13 @@ function clearAll() {
   selectedFiles.clear();
   selectedLibraryTracks.clear();
   analyzedTracks.clear();
+  trackResearch.clear();
   referenceMixes.clear();
-  playSecondsTouched = false;
   blendSecondsTouched = false;
   els.audioUrlInput.value = "";
+  els.timingAuto.checked = true;
+  els.timingManual.checked = false;
+  els.playSeconds.value = "";
   liveQueue.splice(0, liveQueue.length);
   stopLiveMix();
   renderFiles();
@@ -1363,6 +1620,13 @@ function clearAll() {
   hidePlayer();
   clearErrors();
   setStatus("Ready", 0);
+  updateTimingMode();
+}
+
+function updateTimingMode() {
+  const isManual = els.timingManual.checked;
+  els.playSeconds.disabled = !isManual;
+  els.autoTimingNote.textContent = isManual ? "Your timing" : "Research controlled";
 }
 
 function setStatus(text, progress) {
@@ -1371,6 +1635,7 @@ function setStatus(text, progress) {
 }
 
 function toggleBusy(isBusy) {
+  appBusy = isBusy;
   for (const button of [
     els.liveMixButton,
     els.downloadMixButton,
@@ -1384,6 +1649,13 @@ function toggleBusy(isBusy) {
   ]) {
     button.disabled = isBusy;
   }
+  syncActionAvailability();
+}
+
+function syncActionAvailability() {
+  const needsMoreSongs = liveQueue.length < 2;
+  els.liveMixButton.disabled = appBusy || needsMoreSongs;
+  els.downloadMixButton.disabled = appBusy || needsMoreSongs;
 }
 
 function emptyItem(text) {
@@ -1423,6 +1695,10 @@ function formatDuration(seconds) {
   return `${minutes}:${remaining}`;
 }
 
+function formatTime(seconds) {
+  return formatDuration(seconds);
+}
+
 function formatEnergy(value) {
   if (!Number.isFinite(value)) {
     return "0.00";
@@ -1442,6 +1718,7 @@ function escapeHtml(value) {
 renderFiles();
 renderTracks();
 renderQueue();
-renderCatalogResults([]);
+loadInitialLibrary();
 renderReferenceMixes();
+updateTimingMode();
 loadStyleStatus();

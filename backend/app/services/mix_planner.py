@@ -7,6 +7,7 @@ from app.models.mix import MixableTrack, MixPlan, MixPlanRequest, MixTrackPlacem
 from app.models.style_profile import DJStyleProfile
 from app.models.track import TrackAnalysis
 from app.services.compatibility import CompatibilityService
+from app.services.song_research_service import recommend_play_window
 
 
 class MixPlanningError(Exception):
@@ -45,9 +46,11 @@ class MixPlanner:
 
         target_seconds = request.target_duration_minutes * 60 if request.target_duration_minutes else None
         target_limit = (target_seconds / len(tracks)) if target_seconds else None
-        profile_max_play = self.style_profile.max_play_seconds_per_track if request.use_trained_style and self.style_profile else None
-        requested_max_play = request.max_play_seconds_per_track or profile_max_play
-        per_track_limit = _per_track_limit(target_limit, requested_max_play)
+        per_track_limit = _per_track_limit(target_limit, request.max_play_seconds_per_track)
+        play_windows = {
+            track_id: recommend_play_window(analysis_by_id[track_id])
+            for track_id in ordered_ids
+        }
 
         placements: list[MixTrackPlacement] = []
         transitions: list[MixTransition] = []
@@ -61,11 +64,20 @@ class MixPlanner:
         transition_bars = _direction_adjusted_transition_bars(requested_transition_bars, request.mix_direction)
         active_style_profile = self.style_profile if request.use_trained_style else None
 
-        source_starts = [0.0] + [_choose_track_start(track, active_style_profile) for track in tracks[1:]]
+        source_starts = [
+            play_windows[track.track_id].start_seconds
+            if per_track_limit is None
+            else _choose_track_start(track, active_style_profile)
+            for track in tracks
+        ]
 
         for index, track in enumerate(tracks):
             source_start = source_starts[index]
-            source_end = _choose_track_end(track, source_start, per_track_limit)
+            source_end = (
+                play_windows[track.track_id].end_seconds
+                if per_track_limit is None
+                else _choose_track_end(track, source_start, per_track_limit)
+            )
             transition_duration = 0.0
 
             if index < len(tracks) - 1:
@@ -77,6 +89,18 @@ class MixPlanner:
                     self.style_profile if request.use_trained_style else None,
                 )
                 source_end = _choose_transition_end(track, source_start, source_end, transition_duration, active_style_profile)
+                if per_track_limit is None:
+                    play_window = play_windows[track.track_id]
+                    minimum_end_after_peak = min(
+                        play_window.end_seconds,
+                        play_window.peak_seconds + transition_duration + 4.0,
+                    )
+                    if source_end < minimum_end_after_peak:
+                        boundary = _nearest_bar_after(track, minimum_end_after_peak)
+                        source_end = min(
+                            play_window.end_seconds,
+                            boundary or minimum_end_after_peak,
+                        )
 
             timeline_end = round(timeline_start + max(0.0, source_end - source_start), 3)
             placements.append(
@@ -391,6 +415,17 @@ def _nearest_bar_before(track: MixableTrack, time_seconds: float) -> float | Non
     if not candidates:
         return None
     return round(max(candidates), 3)
+
+
+def _nearest_bar_after(track: MixableTrack, time_seconds: float) -> float | None:
+    candidates = [
+        bar.start_time
+        for bar in track.approximate_bars
+        if time_seconds <= bar.start_time <= track.duration_seconds
+    ]
+    if not candidates:
+        return None
+    return round(min(candidates), 3)
 
 
 def _energy_at_time(track: MixableTrack, time_seconds: float) -> float:
