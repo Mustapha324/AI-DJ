@@ -7,8 +7,8 @@ The original single-track analysis endpoint is still supported.
 ## Current MVP
 
 - FastAPI backend
-- Easy Mode browser interface at `/`
-- Advanced Mode Swagger documentation at `/docs`
+- Party Mode browser interface at `/`
+- Studio Mode Swagger documentation at `/docs`
 - Search for already analyzed tracks by title, file name, BPM, or key
 - Train a local DJ style profile from reference DJ mixes without adding them to the song queue
 - Single WAV/MP3 analysis through `POST /api/tracks/analyze`
@@ -100,19 +100,19 @@ cd C:\Users\musta\OneDrive\Documents\GitHub\AI-DJ\backend
 ..\.venv\Scripts\python.exe -m uvicorn app.main:app --reload
 ```
 
-Open Easy Mode:
+Open Party Mode:
 
 ```text
 http://127.0.0.1:8000/
 ```
 
-Open Advanced Mode:
+Open Studio Mode:
 
 ```text
 http://127.0.0.1:8000/docs
 ```
 
-## Easy Mode
+## Party Mode
 
 1. Open `http://127.0.0.1:8000/`.
 2. Click **Add MP3s**, choose a whole folder, or drag MP3 files onto the drop zone.
@@ -284,7 +284,7 @@ The tests generate synthetic audio and do not require copyrighted music.
 
 - Batch upload intentionally accepts `.mp3` files only for now.
 - The renderer currently exports WAV only. MP3 export should be added with FFmpeg or a configured encoder.
-- Easy Mode's "Live Mix" starts browser-side playback from selected files or saved tracks after local audio decoding. The final downloadable render still happens on the backend.
+- Party Mode's "Live Mix" starts browser-side playback from selected files or saved tracks after local audio decoding. The final downloadable render still happens on the backend.
 - The live deck plays excerpts by default. Very long MP3s still need to be decoded by the browser before live playback starts.
 - Online song search requires a licensed provider integration before full external songs can be selected without local files.
 - Reference DJ mixes train a deterministic local style profile, not a neural model. It learns usable transition defaults from the audio patterns.
@@ -297,4 +297,4 @@ The tests generate synthetic audio and do not require copyrighted music.
 
 ## Recommended Next Step
 
-Add waveform previews and editable transition points in Easy Mode, then evolve the deterministic style profile into a scored transition model. After that, add FFmpeg-backed MP3 export and move long analysis/render work into a real background queue.
+Add waveform previews and editable transition points in Party Mode, then evolve the deterministic style profile into a scored transition model. After that, add FFmpeg-backed MP3 export and move long analysis/render work into a real background queue.

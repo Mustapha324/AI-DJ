@@ -18,8 +18,8 @@ def create_app() -> FastAPI:
     ensure_storage_dirs()
 
     app = FastAPI(
-        title="AI DJ",
-        description="Backend for analyzing tracks, planning compatible transitions, and rendering DJ mixes.",
+        title="AI DJ Studio Mode",
+        description="Studio controls for analyzing tracks, planning compatible transitions, and rendering DJ mixes.",
         version="0.2.0",
     )
     app.include_router(tracks_router)
@@ -29,7 +29,7 @@ def create_app() -> FastAPI:
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
     @app.get("/", include_in_schema=False)
-    def easy_mode() -> FileResponse:
+    def party_mode() -> FileResponse:
         return FileResponse(STATIC_DIR / "index.html")
 
     @app.get("/health", tags=["health"])

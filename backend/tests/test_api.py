@@ -8,12 +8,23 @@ def test_health_endpoint(client):
     assert response.json() == {"status": "healthy"}
 
 
-def test_easy_mode_page_loads(client):
+def test_party_mode_page_loads(client):
     response = client.get("/")
 
     assert response.status_code == 200
-    assert "Easy Mode" in response.text
+    assert "Party Mode" in response.text
+    assert "Studio Mode" in response.text
+    assert 'class="turntable-visual"' in response.text
     assert "/docs" in response.text
+
+
+def test_live_deck_effects_cannot_break_the_transition(client):
+    response = client.get("/static/app.js")
+
+    assert response.status_code == 200
+    assert "function scheduleBrowserImpact(context, impactTime)" in response.text
+    assert "scheduleBrowserImpact(context, transitionStart + transitionSeconds - 0.04)" in response.text
+    assert 'console.warn("A live DJ effect was skipped so the transition could continue."' in response.text
 
 
 def test_invalid_file_type(client):

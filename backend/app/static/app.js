@@ -9,6 +9,8 @@ let liveSession = null;
 let draggedQueueId = null;
 let blendSecondsTouched = false;
 let appBusy = false;
+let mixBusy = false;
+let liveLineupUpdatePromise = Promise.resolve(false);
 
 const els = {
   dropZone: document.getElementById("dropZone"),
@@ -73,7 +75,17 @@ els.chooseFilesButton.addEventListener("click", () => els.fileInput.click());
 els.chooseFolderButton.addEventListener("click", () => els.folderInput.click());
 els.clearButton.addEventListener("click", clearAll);
 els.stopLiveButton.addEventListener("click", stopLiveMix);
-els.transitionNowButton.addEventListener("click", () => transitionToNextTrack(true));
+els.transitionNowButton.addEventListener("click", () => {
+  try {
+    transitionToNextTrack(true);
+  } catch (error) {
+    if (liveSession) {
+      liveSession.transitioning = false;
+    }
+    setStatus("Could not mix next - current song stays live", 48);
+    showErrors([{ file_name: "Live deck", error: error.message || "The next transition could not start." }]);
+  }
+});
 els.liveMixButton.addEventListener("click", () => makeMix({ live: true }));
 els.downloadMixButton.addEventListener("click", () => makeMix({ live: false }));
 els.chooseReferenceButton.addEventListener("click", () => els.referenceInput.click());
@@ -204,6 +216,9 @@ async function addFiles(files) {
 
     renderTracks();
     renderQueue();
+    const lineupUpdated = liveSession?.playing
+      ? await scheduleLiveLineupUpdate("New songs added")
+      : false;
     if (researchRecords.length === 1) {
       renderTrackResearch(researchRecords[0]);
     } else if (researchRecords.length > 1) {
@@ -214,9 +229,10 @@ async function addFiles(files) {
     const duplicateNote = duplicateCount
       ? ` - ${duplicateCount} duplicate${duplicateCount === 1 ? "" : "s"} skipped`
       : "";
+    const liveNote = lineupUpdated ? " - live lineup updated" : "";
     setStatus(
       trackIds.length
-        ? `${trackIds.length} unique song${trackIds.length === 1 ? "" : "s"} ready${duplicateNote}`
+        ? `${trackIds.length} unique song${trackIds.length === 1 ? "" : "s"} ready${duplicateNote}${liveNote}`
         : duplicateCount
           ? `${duplicateCount} duplicate${duplicateCount === 1 ? "" : "s"} skipped`
           : "No songs added",
@@ -438,7 +454,17 @@ function addLibraryTrack(track, catalogResults) {
   renderTracks();
   renderQueue();
   renderCatalogResults(catalogResults);
-  setStatus(alreadyQueued ? "Song already queued - duplicate skipped" : "Track added to queue", 24);
+  if (alreadyQueued) {
+    setStatus("Song already queued - duplicate skipped", 24);
+    return;
+  }
+  if (liveSession?.playing) {
+    setStatus("Adding song while Party Mode keeps playing", 48);
+    researchTrack(track.track_id, false);
+    scheduleLiveLineupUpdate("Song added").catch(() => {});
+    return;
+  }
+  setStatus("Track added to queue", 24);
   researchTrack(track.track_id);
 }
 
@@ -461,6 +487,7 @@ async function importAudioUrl() {
   try {
     toggleBusy(true);
     setStatus("Importing audio link", 22);
+    const wasLive = Boolean(liveSession?.playing);
     const track = await fetchJson("/api/tracks/import-url", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -478,12 +505,13 @@ async function importAudioUrl() {
     els.audioUrlInput.value = "";
     renderTracks();
     renderQueue();
+    const lineupUpdated = wasLive ? await scheduleLiveLineupUpdate("Linked song added") : false;
     const research = await fetchJson(`/api/tracks/${encodeURIComponent(track.track_id)}/research`);
     trackResearch.set(track.track_id, research);
     renderTracks();
     renderTrackResearch(research);
     clearErrors();
-    setStatus("Audio link researched and ready", 100);
+    setStatus(lineupUpdated ? "Linked song added - live lineup updated" : "Audio link researched and ready", 100);
   } catch (error) {
     showErrors([{ file_name: "Audio link", error: error.message || "Could not import this link." }]);
     setStatus("Import failed", 0);
@@ -504,7 +532,9 @@ function isYoutubeUrl(url) {
 function ensureQueueItem(item) {
   if (!liveQueue.some((queued) => queued.id === item.id)) {
     liveQueue.push(item);
+    return true;
   }
+  return false;
 }
 
 function renderFiles() {
@@ -793,6 +823,10 @@ function cueQueueItemNext(itemId) {
 }
 
 function removeQueueItem(itemId) {
+  if (liveSession?.playing && itemId === liveSession.currentItemId) {
+    setStatus("The playing song stays on deck", 48);
+    return;
+  }
   const index = liveQueue.findIndex((item) => item.id === itemId);
   if (index < 0) {
     return;
@@ -802,6 +836,9 @@ function removeQueueItem(itemId) {
   syncLiveDecodedOrder();
   renderTracks();
   renderQueue();
+  if (liveSession?.playing) {
+    scheduleLiveLineupUpdate("Song removed").catch(() => {});
+  }
 }
 
 function syncLiveDecodedOrder() {
@@ -813,6 +850,156 @@ function syncLiveDecodedOrder() {
   const ordered = liveQueue.map((item) => byId.get(item.id)).filter(Boolean);
   liveSession.decodedQueue = ordered;
   liveSession.currentIndex = current ? ordered.findIndex((item) => item.queueId === current.queueId) : -1;
+}
+
+function scheduleLiveLineupUpdate(reason = "Lineup changed") {
+  if (!liveSession?.playing) {
+    return Promise.resolve(false);
+  }
+  liveLineupUpdatePromise = liveLineupUpdatePromise
+    .catch(() => false)
+    .then(() => refreshLiveLineup(reason));
+  return liveLineupUpdatePromise;
+}
+
+async function refreshLiveLineup(reason) {
+  const session = liveSession;
+  if (!session?.playing || !session.currentItemId) {
+    return false;
+  }
+
+  const decodedByQueueId = new Map(session.decodedQueue.map((track) => [track.queueId, track]));
+  const initialPlayedIds = new Set(
+    session.decodedQueue.slice(0, Math.max(0, session.currentIndex)).map((track) => track.queueId),
+  );
+  const initialCurrentId = session.currentItemId;
+  const pendingItems = uniqueQueueItems(
+    liveQueue.filter((item) => !initialPlayedIds.has(item.id) && item.id !== initialCurrentId),
+  );
+
+  for (const item of pendingItems) {
+    if (decodedByQueueId.has(item.id)) {
+      continue;
+    }
+    const source = sourceFromQueueItem(item);
+    if (!source) {
+      continue;
+    }
+    setStatus(`Preparing ${item.name} - music keeps playing`, 54);
+    const arrayBuffer = await source.loadArrayBuffer();
+    if (liveSession !== session || !session.playing) {
+      return false;
+    }
+    const buffer = await session.context.decodeAudioData(arrayBuffer.slice(0));
+    const analysis =
+      selectedLibraryTracks.get(item.trackId) ||
+      analyzedTracks.get(item.trackId) ||
+      (item.trackId ? await fetchTrack(item.trackId) : null);
+    if (analysis) {
+      selectedLibraryTracks.set(analysis.track_id, analysis);
+      analyzedTracks.set(analysis.track_id, analysis);
+    }
+    decodedByQueueId.set(item.id, {
+      queueId: item.id,
+      trackId: item.trackId,
+      name: item.name,
+      bpm: analysis?.estimated_bpm || item.bpm || null,
+      keyName: analysis?.key?.display_name || item.keyName || null,
+      buffer,
+      startOffset: 0,
+      plannedWindow: null,
+    });
+  }
+
+  if (liveSession !== session || !session.playing) {
+    return false;
+  }
+
+  const pendingTrackIds = unique(pendingItems.map((item) => item.trackId));
+  let updatedPlan = null;
+  let orderedTrackIds = pendingTrackIds;
+  if (pendingTrackIds.length >= 2) {
+    setStatus("AI updating what plays next - current song stays live", 62);
+    updatedPlan = await createPlan(pendingTrackIds, {
+      autoOrder: els.autoOrder.checked,
+      mixNamePrefix: "Party Lineup",
+    });
+    orderedTrackIds = updatedPlan.track_order || pendingTrackIds;
+  }
+
+  if (liveSession !== session || !session.playing) {
+    return false;
+  }
+
+  const latestCurrentId = session.currentItemId;
+  const latestCurrent = decodedByQueueId.get(latestCurrentId);
+  if (!latestCurrent) {
+    return false;
+  }
+  const latestPlayed = session.decodedQueue
+    .slice(0, Math.max(0, session.currentIndex))
+    .filter((track) => track.queueId !== latestCurrentId);
+  const latestPlayedIds = new Set(latestPlayed.map((track) => track.queueId));
+  const latestFutureItems = uniqueQueueItems(
+    liveQueue.filter((item) => !latestPlayedIds.has(item.id) && item.id !== latestCurrentId),
+  );
+  const futureByTrackId = new Map(
+    latestFutureItems
+      .filter((item) => item.trackId)
+      .map((item) => [item.trackId, item]),
+  );
+  const plannedFuture = orderedTrackIds.map((trackId) => futureByTrackId.get(trackId)).filter(Boolean);
+  const remainingFuture = latestFutureItems.filter(
+    (item) => !plannedFuture.some((planned) => planned.id === item.id),
+  );
+  const orderedFutureItems = [...plannedFuture, ...remainingFuture];
+  const decodedFuture = orderedFutureItems.map((item) => decodedByQueueId.get(item.id)).filter(Boolean);
+
+  if (updatedPlan) {
+    for (const track of decodedFuture) {
+      const placement = plannedPlacementForTrack(updatedPlan, track.trackId);
+      track.startOffset = placement?.source_start_time || 0;
+      track.plannedWindow =
+        placement && placement.source_end_time > placement.source_start_time
+          ? placement.source_end_time - placement.source_start_time
+          : null;
+    }
+    session.plan = updatedPlan;
+    applyPlanToLiveControls(updatedPlan);
+  }
+
+  const queueById = new Map(liveQueue.map((item) => [item.id, item]));
+  const displayedPlayed = latestPlayed.map((track) => queueById.get(track.queueId)).filter(Boolean);
+  const displayedCurrent = queueById.get(latestCurrentId);
+  const displayedFuture = orderedFutureItems.filter((item) => queueById.has(item.id));
+  liveQueue.splice(
+    0,
+    liveQueue.length,
+    ...displayedPlayed,
+    ...(displayedCurrent ? [displayedCurrent] : []),
+    ...displayedFuture,
+  );
+  session.decodedQueue = [...latestPlayed, latestCurrent, ...decodedFuture];
+  session.currentIndex = latestPlayed.length;
+  renderTracks();
+  renderQueue();
+  setStatus(`${reason} - music kept playing`, 68);
+  return true;
+}
+
+function uniqueQueueItems(items) {
+  const seenTrackIds = new Set();
+  const seenQueueIds = new Set();
+  return items.filter((item) => {
+    if (seenQueueIds.has(item.id) || (item.trackId && seenTrackIds.has(item.trackId))) {
+      return false;
+    }
+    seenQueueIds.add(item.id);
+    if (item.trackId) {
+      seenTrackIds.add(item.trackId);
+    }
+    return true;
+  });
 }
 
 function selectedTrackSummaries() {
@@ -833,7 +1020,7 @@ async function makeMix({ live }) {
     return;
   }
 
-  toggleBusy(true);
+  setMixBusy(true);
   clearErrors();
   stopLiveMix();
   if (!live) hidePlayer();
@@ -912,7 +1099,7 @@ async function makeMix({ live }) {
     setStatus(live && liveSession?.playing ? "Live playing, render stopped" : "Stopped", live ? 34 : 0);
     showErrors([{ file_name: "Mix", error: error.message || "Something went wrong." }]);
   } finally {
-    toggleBusy(false);
+    setMixBusy(false);
   }
 }
 
@@ -1023,6 +1210,7 @@ async function startBrowserLiveMix(queueItems, plan = null) {
   }
 
   playLiveTrackAtIndex(0, 0.8);
+  updateBusyControls();
   setStatus("Live deck playing", 42);
 }
 
@@ -1200,8 +1388,12 @@ function transitionToNextTrack(manual) {
   });
 
   if (liveSession.withSfx) {
-    scheduleBrowserChannelEffects(liveSession.currentChannel, now, transition, transitionEffects);
-    scheduleBrowserSfx(context, now, transition, transitionEffects);
+    try {
+      scheduleBrowserChannelEffects(liveSession.currentChannel, now, transition, transitionEffects);
+      scheduleBrowserSfx(context, now, transition, transitionEffects);
+    } catch (error) {
+      console.warn("A live DJ effect was skipped so the transition could continue.", error);
+    }
   }
 
   liveSession.currentIndex = nextIndex;
@@ -1429,9 +1621,8 @@ function scheduleBrowserBrakeCut(context, transitionStart, transitionSeconds) {
   brake.stop(start + 0.46);
 }
 
-function scheduleBrowserImpact(impactTime) {
-  const context = liveSession?.context;
-  if (!context) {
+function scheduleBrowserImpact(context, impactTime) {
+  if (!context || !Number.isFinite(impactTime)) {
     return;
   }
   const impact = context.createOscillator();
@@ -1496,17 +1687,19 @@ async function fetchTrack(trackId) {
   return fetchJson(`/api/tracks/${encodeURIComponent(trackId)}`);
 }
 
-async function createPlan(trackIds) {
+async function createPlan(trackIds, options = {}) {
   const targetMinutes = Number.parseFloat(els.targetMinutes.value);
   const playSeconds = numericValue(els.playSeconds, 90);
   const useAiTiming = els.timingAuto.checked;
+  const autoOrder = options.autoOrder ?? els.autoOrder.checked;
+  const mixNamePrefix = options.mixNamePrefix || "Party Mix";
   const body = {
     track_ids: trackIds,
-    mix_name: `Easy Mix ${new Date().toLocaleString()}`,
+    mix_name: `${mixNamePrefix} ${new Date().toLocaleString()}`,
     transition_bars: 8,
     target_duration_minutes: Number.isFinite(targetMinutes) ? targetMinutes : null,
     max_play_seconds_per_track: useAiTiming ? null : playSeconds,
-    auto_order: els.autoOrder.checked,
+    auto_order: autoOrder,
     mix_direction: els.mixDirection.value.trim() || null,
     use_transition_sfx: els.useSfx.checked,
     use_trained_style: els.useTrainedStyle.checked,
@@ -1636,10 +1829,17 @@ function setStatus(text, progress) {
 
 function toggleBusy(isBusy) {
   appBusy = isBusy;
+  updateBusyControls();
+}
+
+function setMixBusy(isBusy) {
+  mixBusy = isBusy;
+  updateBusyControls();
+}
+
+function updateBusyControls() {
+  const setupBusy = appBusy || (mixBusy && !liveSession?.playing);
   for (const button of [
-    els.liveMixButton,
-    els.downloadMixButton,
-    els.clearButton,
     els.chooseFilesButton,
     els.chooseFolderButton,
     els.loadLibraryButton,
@@ -1647,15 +1847,16 @@ function toggleBusy(isBusy) {
     els.importUrlButton,
     els.chooseReferenceButton,
   ]) {
-    button.disabled = isBusy;
+    button.disabled = setupBusy;
   }
+  els.clearButton.disabled = appBusy || mixBusy;
   syncActionAvailability();
 }
 
 function syncActionAvailability() {
   const needsMoreSongs = liveQueue.length < 2;
-  els.liveMixButton.disabled = appBusy || needsMoreSongs;
-  els.downloadMixButton.disabled = appBusy || needsMoreSongs;
+  els.liveMixButton.disabled = appBusy || mixBusy || needsMoreSongs;
+  els.downloadMixButton.disabled = appBusy || mixBusy || needsMoreSongs;
 }
 
 function emptyItem(text) {
