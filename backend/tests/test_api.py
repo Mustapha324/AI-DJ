@@ -16,6 +16,7 @@ def test_party_mode_page_loads(client):
     assert "Studio Mode" in response.text
     assert 'class="turntable-visual"' in response.text
     assert 'id="genreFilter"' in response.text
+    assert 'id="transitionSeconds" type="number" min="2" max="12" step="1" value="6"' in response.text
     assert "/docs" in response.text
 
 
@@ -27,6 +28,14 @@ def test_live_deck_effects_cannot_break_the_transition(client):
     assert "scheduleBrowserImpact(context, transitionStart + transitionSeconds - 0.04)" in response.text
     assert 'console.warn("A live DJ effect was skipped so the transition could continue."' in response.text
     assert "function scheduleOutgoingLoopBed(track, transitionStart, transitionSeconds, planned)" in response.text
+    assert "function scheduleBassHandoff(gainParam, startTime, duration, swapPosition, incoming)" in response.text
+    assert "function scheduleTechniqueFilters(outgoingChannel, incomingChannel" in response.text
+    assert 'echo_fade: "echo fade"' in response.text
+    assert 'filter_blend: "filter blend"' in response.text
+    assert "gainParam.setValueCurveAtTime(curve" in response.text
+    assert "oldSource.stop(now + transition" in response.text
+    assert "Math.min(0.45, transition * 0.18)" not in response.text
+    assert "transition_bars: 4" in response.text
 
 
 def test_invalid_file_type(client):

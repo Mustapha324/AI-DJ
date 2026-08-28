@@ -205,7 +205,7 @@ def _build_profile(features: list[ReferenceMixFeature], name: str, profile_id: s
     median_transition_density = _median_or(transition_density_values, 1.0)
     beat_strength = _median_or(beat_strength_values, 0.7)
 
-    transition_seconds = float(np.clip(median_phrase * 0.65, 6.0, 28.0))
+    transition_seconds = float(np.clip(median_phrase * 0.42, 4.0, 8.0))
     default_transition_bars = _bars_from_seconds(transition_seconds, features)
     max_play_seconds = float(np.clip(median_spacing * 0.86, 35.0, 135.0))
     sfx_density = float(np.clip((median_change * 3.0) + 0.2, 0.15, 0.95))

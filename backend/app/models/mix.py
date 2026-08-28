@@ -10,7 +10,15 @@ from app.models.track import ApproximateBar, EnergyPoint, KeyEstimate
 
 TransitionType = Literal["crossfade"]
 CrossfadeCurve = Literal["equal_power", "linear"]
-TransitionTechnique = Literal["phrase_blend", "bass_swap", "loop_echo_out", "drop_swap", "quick_cut"]
+TransitionTechnique = Literal[
+    "phrase_blend",
+    "echo_fade",
+    "filter_blend",
+    "bass_swap",
+    "loop_echo_out",
+    "drop_swap",
+    "quick_cut",
+]
 MixStatus = Literal["planned", "queued", "rendering", "completed", "failed"]
 OutputFormat = Literal["wav"]
 
@@ -32,7 +40,7 @@ class MixableTrack(BaseModel):
 class MixPlanRequest(BaseModel):
     track_ids: list[str] = Field(..., min_length=2)
     mix_name: str = Field(default="AI DJ Mix", min_length=1, max_length=120)
-    transition_bars: int = Field(default=8, ge=1, le=32)
+    transition_bars: int = Field(default=4, ge=1, le=32)
     target_duration_minutes: float | None = Field(default=None, gt=0, le=180)
     max_play_seconds_per_track: float | None = Field(default=None, ge=15, le=1800)
     auto_order: bool = True

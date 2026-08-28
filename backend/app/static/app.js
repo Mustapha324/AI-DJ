@@ -535,7 +535,7 @@ function updateStyleStatus(profile) {
   const intensity = Math.round((profile.effect_intensity || profile.sfx_density || 0) * 100);
   els.styleStatus.textContent = `${profile.reference_count} refs / FX ${intensity}%`;
   if (!blendSecondsTouched) {
-    els.transitionSeconds.value = Math.round(profile.transition_duration_seconds);
+    els.transitionSeconds.value = Math.round(Math.min(8, profile.transition_duration_seconds));
   }
 }
 
@@ -1266,8 +1266,16 @@ async function startBrowserLiveMix(queueItems, plan = null) {
   }
 
   const context = new AudioContextClass();
+  const master = context.createDynamicsCompressor();
+  master.threshold.setValueAtTime(-10, context.currentTime);
+  master.knee.setValueAtTime(12, context.currentTime);
+  master.ratio.setValueAtTime(3, context.currentTime);
+  master.attack.setValueAtTime(0.008, context.currentTime);
+  master.release.setValueAtTime(0.28, context.currentTime);
+  master.connect(context.destination);
   liveSession = {
     context,
+    master,
     decodedQueue: [],
     currentIndex: -1,
     currentItemId: null,
@@ -1283,7 +1291,7 @@ async function startBrowserLiveMix(queueItems, plan = null) {
     transitioning: false,
     plan,
     segmentSeconds: numericValue(els.playSeconds, 90),
-    transitionSeconds: numericValue(els.transitionSeconds, 10),
+    transitionSeconds: numericValue(els.transitionSeconds, 6),
     withSfx: els.useSfx.checked,
   };
   els.playerPanel.classList.remove("hidden");
@@ -1454,16 +1462,15 @@ function transitionToNextTrack(manual) {
     liveSession.decodedQueue[nextIndex + 1] ? transitionSecondsBetween(nextTrack, liveSession.decodedQueue[nextIndex + 1]) : transition,
   );
   const nextSource = context.createBufferSource();
-  const nextChannel = createLiveChannel(context, now, -10);
+  const nextChannel = createLiveChannel(context, now, -12);
 
   nextSource.buffer = nextTrack.buffer;
   nextSource.playbackRate.setValueAtTime(playbackRate, now);
   nextSource.connect(nextChannel.eq);
   nextChannel.gain.gain.setValueAtTime(0.0001, now);
   scheduleEqualPowerFade(nextChannel.gain.gain, now, transition, true, technique);
-  const bassSwap = Math.max(0.15, Math.min(0.85, plannedTransition?.bass_swap_position || 0.5));
-  nextChannel.eq.gain.linearRampToValueAtTime(-10, now + transition * bassSwap);
-  nextChannel.eq.gain.linearRampToValueAtTime(0, now + transition * Math.min(1, bassSwap + 0.18));
+  const bassSwap = Math.max(0.25, Math.min(0.82, plannedTransition?.bass_swap_position || 0.58));
+  scheduleBassHandoff(nextChannel.eq.gain, now, transition, bassSwap, true);
   nextSource.start(now, nextOffset, livePlaybackDuration(nextTrack, nextWindow, transition, playbackRate));
   liveSession.activeSources.add(nextSource);
 
@@ -1472,23 +1479,17 @@ function transitionToNextTrack(manual) {
     scheduleEqualPowerFade(liveSession.currentGain.gain, now, transition, false, technique);
   }
   if (liveSession.currentChannel) {
-    liveSession.currentChannel.eq.gain.cancelScheduledValues(now);
-    liveSession.currentChannel.eq.gain.setValueAtTime(0, now);
-    liveSession.currentChannel.eq.gain.linearRampToValueAtTime(-18, now + transition * bassSwap);
+    scheduleBassHandoff(liveSession.currentChannel.eq.gain, now, transition, bassSwap, false);
   }
+  scheduleTechniqueFilters(liveSession.currentChannel, nextChannel, now, transition, technique);
   const loopBed = scheduleOutgoingLoopBed(currentTrack, now, transition, plannedTransition);
   if (liveSession.currentSource) {
     const oldSource = liveSession.currentSource;
-    liveSession.timers.push(
-      window.setTimeout(() => {
-        try {
-          oldSource.stop();
-        } catch {
-          // Source may already be stopped.
-        }
-        liveSession?.activeSources?.delete(oldSource);
-      }, (loopBed ? Math.min(0.45, transition * 0.18) : transition) * 1000 + 80),
-    );
+    try {
+      oldSource.stop(now + transition + (loopBed ? 0.18 : 0.08));
+    } catch {
+      // Source may already have reached its scheduled ending.
+    }
   }
 
   nextSource.addEventListener("ended", () => {
@@ -1523,7 +1524,7 @@ function transitionToNextTrack(manual) {
     }, transition * 1000 + 120),
   );
   liveSession.timers.push(window.setTimeout(() => transitionToNextTrack(false), Math.max(1000, nextWindow * 1000)));
-  setStatus(`${manual ? "Manual" : "AI"} ${transitionTechniqueLabel(technique)}`, 52);
+  setStatus(`${manual ? "Manual" : "AI"} ${transitionTechniqueLabel(technique)} - ${transition.toFixed(1)} sec`, 52);
   renderQueue();
 }
 
@@ -1550,10 +1551,10 @@ function transitionSecondsBetween(sourceTrack, targetTrack) {
   if (!blendSecondsTouched) {
     const planned = plannedTransitionBetween(sourceTrack, targetTrack);
     if (planned?.duration_seconds) {
-      return Math.max(2, Math.min(45, planned.duration_seconds));
+      return Math.max(2, Math.min(6, planned.duration_seconds));
     }
   }
-  return Math.max(2, numericValue(els.transitionSeconds, liveSession.transitionSeconds));
+  return Math.max(2, Math.min(12, numericValue(els.transitionSeconds, liveSession.transitionSeconds)));
 }
 
 function aiPlaybackRateForNext(nextTrack) {
@@ -1567,6 +1568,7 @@ function aiPlaybackRateForNext(nextTrack) {
 
 function createLiveChannel(context, now, initialBassDb = 0) {
   const eq = context.createBiquadFilter();
+  const filter = context.createBiquadFilter();
   const gain = context.createGain();
   const delay = context.createDelay(1.2);
   const feedback = context.createGain();
@@ -1574,35 +1576,76 @@ function createLiveChannel(context, now, initialBassDb = 0) {
   eq.type = "lowshelf";
   eq.frequency.setValueAtTime(180, now);
   eq.gain.setValueAtTime(initialBassDb, now);
+  filter.type = "lowpass";
+  filter.frequency.setValueAtTime(20000, now);
+  filter.Q.setValueAtTime(0.5, now);
   delay.delayTime.setValueAtTime(0.18, now);
   feedback.gain.setValueAtTime(0.0001, now);
   delayWet.gain.setValueAtTime(0.0001, now);
-  eq.connect(gain);
-  gain.connect(context.destination);
+  eq.connect(filter);
+  filter.connect(gain);
+  gain.connect(liveSession?.master || context.destination);
   gain.connect(delay);
   delay.connect(feedback);
   feedback.connect(delay);
-  delay.connect(delayWet).connect(context.destination);
-  return { eq, gain, delay, feedback, delayWet };
+  delay.connect(delayWet).connect(liveSession?.master || context.destination);
+  return { eq, filter, gain, delay, feedback, delayWet };
 }
 
 function scheduleEqualPowerFade(gainParam, startTime, duration, fadeIn, technique = "phrase_blend") {
-  const steps = 24;
+  const steps = 129;
+  const curve = new Float32Array(steps);
   gainParam.cancelScheduledValues(startTime);
-  gainParam.setValueAtTime(fadeIn ? 0.0001 : 1.0, startTime);
-  for (let step = 1; step <= steps; step += 1) {
-    const progress = step / steps;
-    let curve = fadeIn ? Math.sin(progress * Math.PI * 0.5) : Math.cos(progress * Math.PI * 0.5);
-    if (!fadeIn && ["phrase_blend", "loop_echo_out"].includes(technique)) {
-      curve = curve ** 0.72;
-    }
+  for (let step = 0; step < steps; step += 1) {
+    const progress = step / (steps - 1);
+    let value;
     if (technique === "quick_cut") {
-      curve = fadeIn
-        ? Math.max(0.0001, Math.min(1, (progress - 0.12) / 0.48))
-        : Math.max(0.0001, 1 - progress / 0.52);
+      const shifted = Math.max(0, Math.min(1, (progress - 0.08) / 0.84));
+      const eased = shifted * shifted * (3 - 2 * shifted);
+      value = fadeIn ? eased : 1 - eased;
+    } else if (fadeIn) {
+      value = Math.sin(progress * Math.PI * 0.5) ** 1.18;
+    } else {
+      const base = Math.max(0, Math.cos(progress * Math.PI * 0.5));
+      const power = ["phrase_blend", "echo_fade", "filter_blend", "loop_echo_out"].includes(technique)
+        ? 0.52
+        : 0.64;
+      value = base ** power;
     }
-    gainParam.linearRampToValueAtTime(Math.max(0.0001, curve), startTime + duration * progress);
+    curve[step] = Math.max(0.0001, Math.min(1, value));
   }
+  gainParam.setValueCurveAtTime(curve, startTime, Math.max(0.05, duration));
+}
+
+function scheduleBassHandoff(gainParam, startTime, duration, swapPosition, incoming) {
+  const steps = 97;
+  const curve = new Float32Array(steps);
+  const handoffWidth = 0.26;
+  const start = Math.max(0.08, swapPosition - handoffWidth / 2);
+  const end = Math.min(0.94, swapPosition + handoffWidth / 2);
+  gainParam.cancelScheduledValues(startTime);
+  for (let step = 0; step < steps; step += 1) {
+    const progress = step / (steps - 1);
+    const scaled = Math.max(0, Math.min(1, (progress - start) / Math.max(0.01, end - start)));
+    const eased = scaled * scaled * (3 - 2 * scaled);
+    curve[step] = incoming ? -12 * (1 - eased) : -12 * eased;
+  }
+  gainParam.setValueCurveAtTime(curve, startTime, Math.max(0.05, duration));
+}
+
+function scheduleTechniqueFilters(outgoingChannel, incomingChannel, startTime, duration, technique) {
+  if (technique !== "filter_blend" || !outgoingChannel?.filter || !incomingChannel?.filter) {
+    return;
+  }
+  outgoingChannel.filter.type = "lowpass";
+  outgoingChannel.filter.frequency.cancelScheduledValues(startTime);
+  outgoingChannel.filter.frequency.setValueAtTime(20000, startTime);
+  outgoingChannel.filter.frequency.exponentialRampToValueAtTime(2200, startTime + duration * 0.92);
+
+  incomingChannel.filter.type = "highpass";
+  incomingChannel.filter.frequency.cancelScheduledValues(startTime);
+  incomingChannel.filter.frequency.setValueAtTime(900, startTime);
+  incomingChannel.filter.frequency.exponentialRampToValueAtTime(28, startTime + duration * 0.72);
 }
 
 function liveTransitionEffects(sourceTrack, targetTrack) {
@@ -1818,7 +1861,7 @@ async function createPlan(trackIds, options = {}) {
   const body = {
     track_ids: trackIds,
     mix_name: `${mixNamePrefix} ${new Date().toLocaleString()}`,
-    transition_bars: 8,
+    transition_bars: 4,
     target_duration_minutes: Number.isFinite(targetMinutes) ? targetMinutes : null,
     max_play_seconds_per_track: useAiTiming ? null : playSeconds,
     auto_order: autoOrder,
@@ -2031,20 +2074,33 @@ function scheduleOutgoingLoopBed(track, transitionStart, transitionSeconds, plan
   }
 
   const source = context.createBufferSource();
-  const channel = createLiveChannel(context, transitionStart, -18);
+  const channel = createLiveChannel(context, transitionStart, -10);
   source.buffer = track.buffer;
   source.loop = true;
   source.loopStart = loopStart;
   source.loopEnd = loopEnd;
   source.playbackRate.setValueAtTime(playbackRate, transitionStart);
   source.connect(channel.eq);
-  channel.gain.gain.setValueAtTime(0.0001, transitionStart);
-  channel.gain.gain.linearRampToValueAtTime(0.24, transitionStart + Math.min(0.35, transitionSeconds * 0.12));
-  channel.gain.gain.setValueAtTime(0.24, transitionStart + transitionSeconds * 0.55);
-  channel.gain.gain.exponentialRampToValueAtTime(0.0001, transitionStart + transitionSeconds);
+  const loopGain = new Float32Array(97);
+  for (let step = 0; step < loopGain.length; step += 1) {
+    const progress = step / (loopGain.length - 1);
+    let value;
+    if (progress < 0.2) {
+      const rise = progress / 0.2;
+      value = 0.38 * Math.sin(rise * Math.PI * 0.5);
+    } else if (progress < 0.68) {
+      value = 0.38;
+    } else {
+      const fall = (progress - 0.68) / 0.32;
+      value = 0.38 * Math.cos(fall * Math.PI * 0.5) ** 0.7;
+    }
+    loopGain[step] = Math.max(0.0001, value);
+  }
+  channel.gain.gain.cancelScheduledValues(transitionStart);
+  channel.gain.gain.setValueCurveAtTime(loopGain, transitionStart, transitionSeconds);
   scheduleBrowserChannelEffects(channel, transitionStart, transitionSeconds, planned?.sfx || ["echo_tail"]);
   source.start(transitionStart, loopStart);
-  source.stop(transitionStart + transitionSeconds + 0.08);
+  source.stop(transitionStart + transitionSeconds + 0.18);
   liveSession.activeSources.add(source);
   source.addEventListener("ended", () => liveSession?.activeSources?.delete(source));
   return source;
@@ -2053,6 +2109,8 @@ function scheduleOutgoingLoopBed(track, transitionStart, transitionSeconds, plan
 function transitionTechniqueLabel(technique) {
   return {
     phrase_blend: "phrase blend",
+    echo_fade: "echo fade",
+    filter_blend: "filter blend",
     bass_swap: "bass-swap blend",
     loop_echo_out: "loop-and-echo blend",
     drop_swap: "drop swap",

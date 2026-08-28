@@ -23,7 +23,7 @@ The original single-track analysis endpoint is still supported.
 - Browser-side live deck with a draggable queue, Play Next, Transition Now, and Stop Live controls
 - Excerpt-based mixing so long songs or full DJ sets do not have to play end to end
 - Real WAV rendering with phrase-aware cue points, bass-swap crossfades, gain normalization, fade-in/fade-out, and clipping prevention
-- Adaptive phrase blends, bass swaps, drop swaps, and beat-synced loop/echo outros that keep the outgoing song underneath the next track
+- Match-aware rotation across clean fades, echo fades, filter blends, bass swaps, drop swaps, quick cuts, and beat-synced repeat/echo outros
 - Procedural transition SFX such as sweeps and downbeat impacts
 - Mix audio streaming through `GET /api/mixes/{mix_id}/audio`
 
@@ -233,7 +233,7 @@ Create a plan first:
 {
   "track_ids": ["TRACK_ID_1", "TRACK_ID_2", "TRACK_ID_3"],
   "mix_name": "First AI Mix",
-  "transition_bars": 8,
+  "transition_bars": 4,
   "target_duration_minutes": 10,
   "max_play_seconds_per_track": 75,
   "auto_order": true,

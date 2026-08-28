@@ -1,5 +1,11 @@
 from __future__ import annotations
 
+import numpy as np
+import pytest
+
+from app.services.mix_planner import _adaptive_transition_target
+from app.services.mix_renderer import _repeat_with_crossfade
+
 
 def _analyze_three_tracks(client, synthetic_mp3_named_uploads) -> list[str]:
     response = client.post(
@@ -8,6 +14,57 @@ def _analyze_three_tracks(client, synthetic_mp3_named_uploads) -> list[str]:
     )
     assert response.status_code == 201
     return [track["track_id"] for track in response.json()["tracks"]]
+
+
+def test_repeated_transition_loop_crossfades_its_seams():
+    snippet = np.linspace(-0.8, 0.8, 240, dtype=np.float32)
+    repeated = _repeat_with_crossfade(snippet, 1200, 36)
+
+    assert len(repeated) == 1200
+    assert float(np.max(np.abs(np.diff(repeated)))) < 0.2
+
+
+def test_transition_time_adapts_to_the_song_pair():
+    close_match = _adaptive_transition_target(0.92, 1.0, 0.08, "phrase_blend", "smooth and clean")
+    difficult_match = _adaptive_transition_target(0.58, 10.0, 0.55, "loop_echo_out", None)
+    quick_match = _adaptive_transition_target(0.82, 2.0, 0.12, "quick_cut", "short blend")
+
+    assert 5.0 <= close_match <= 6.0
+    assert 2.5 <= difficult_match <= 4.0
+    assert quick_match < close_match
+
+
+@pytest.mark.parametrize(
+    ("direction", "expected_technique"),
+    [
+        ("repeat the ending", "loop_echo_out"),
+        ("clean fade", "phrase_blend"),
+        ("echo out", "echo_fade"),
+        ("filter blend", "filter_blend"),
+        ("bass swap", "bass_swap"),
+        ("drop into the next song", "drop_swap"),
+        ("quick cut", "quick_cut"),
+    ],
+)
+def test_requested_transition_families_remain_available(
+    client,
+    synthetic_mp3_named_uploads,
+    direction,
+    expected_technique,
+):
+    track_ids = _analyze_three_tracks(client, synthetic_mp3_named_uploads)
+    response = client.post(
+        "/api/mixes/plan",
+        json={
+            "track_ids": track_ids[:2],
+            "mix_name": f"{expected_technique} test",
+            "auto_order": False,
+            "mix_direction": direction,
+        },
+    )
+
+    assert response.status_code == 201
+    assert response.json()["transitions"][0]["technique"] == expected_technique
 
 
 def test_mix_plan_creation_and_transition_timing(client, synthetic_mp3_named_uploads):
@@ -35,22 +92,34 @@ def test_mix_plan_creation_and_transition_timing(client, synthetic_mp3_named_upl
     assert plan["max_play_seconds_per_track"] == 45
     assert len(plan["placements"]) == 3
     assert len(plan["transitions"]) == 2
+    techniques = [transition["technique"] for transition in plan["transitions"]]
+    assert len(set(techniques)) == len(techniques)
     for transition in plan["transitions"]:
         assert transition["source_transition_start"] < transition["source_transition_end"]
         assert transition["timeline_start_time"] < transition["timeline_end_time"]
         assert transition["target_transition_start"] >= 0.0
         assert transition["target_transition_end"] > transition["target_transition_start"]
         assert transition["duration_seconds"] > 0
-        assert transition["technique"] in {"phrase_blend", "bass_swap", "loop_echo_out", "drop_swap", "quick_cut"}
+        assert transition["duration_seconds"] <= 6
+        assert transition["technique"] in {
+            "phrase_blend",
+            "echo_fade",
+            "filter_blend",
+            "bass_swap",
+            "loop_echo_out",
+            "drop_swap",
+            "quick_cut",
+        }
         assert 0.15 <= transition["bass_swap_position"] <= 0.85
         assert transition["background_tail_seconds"] >= 0
         if transition["technique"] == "loop_echo_out":
             assert transition["outgoing_loop_beats"] in {2, 4}
             assert transition["outgoing_loop_seconds"] > 0
-        assert transition["sfx"][0] == "filter_sweep"
-        assert "echo_tail" in transition["sfx"]
-        assert "reverb_riser" in transition["sfx"]
-        assert "reverse_swell" in transition["sfx"]
+        assert len(transition["sfx"]) <= 3
+        if transition["technique"] == "bass_swap":
+            assert "filter_sweep" in transition["sfx"]
+        if transition["technique"] == "phrase_blend":
+            assert "soft_sweep" in transition["sfx"]
     for placement in plan["placements"]:
         assert placement["source_end_time"] - placement["source_start_time"] <= 45
 
