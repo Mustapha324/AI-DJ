@@ -148,32 +148,111 @@ def _append_with_crossfade(
     if fade == 0:
         return np.concatenate([current, incoming])
 
-    overlap = _dj_blend_overlap(current[-fade:], incoming[:fade], sample_rate)
+    outgoing = current[-fade:].copy()
+    if transition:
+        outgoing = _prepare_outgoing_transition(outgoing, sample_rate, transition)
+    overlap = _dj_blend_overlap(outgoing, incoming[:fade], sample_rate, transition)
     if transition and transition.sfx:
-        overlap = _add_transition_sfx(overlap, sample_rate, transition.sfx)
+        overlap = _add_transition_sfx(
+            overlap,
+            sample_rate,
+            [name for name in transition.sfx if name not in {"echo_tail", "echo_freeze", "loop_roll", "brake_cut"}],
+        )
     return np.concatenate([current[:-fade], overlap, incoming[fade:]])
 
 
-def _dj_blend_overlap(outgoing: np.ndarray, incoming: np.ndarray, sample_rate: int) -> np.ndarray:
+def _prepare_outgoing_transition(
+    outgoing: np.ndarray,
+    sample_rate: int,
+    transition: MixTransition,
+) -> np.ndarray:
+    prepared = outgoing.copy()
+    if transition.outgoing_loop_seconds > 0 and transition.background_tail_seconds > 0:
+        prepared = _layer_outgoing_loop(
+            prepared,
+            sample_rate,
+            transition.outgoing_loop_seconds,
+            transition.background_tail_seconds,
+        )
+    if "loop_roll" in transition.sfx and transition.outgoing_loop_seconds <= 0:
+        prepared = _add_loop_roll(prepared, sample_rate)
+    if "echo_tail" in transition.sfx:
+        prepared = _add_echo_tail(prepared, sample_rate)
+    if "echo_freeze" in transition.sfx:
+        prepared = _add_echo_freeze(prepared, sample_rate)
+    if "brake_cut" in transition.sfx:
+        prepared = _add_brake_cut(prepared, sample_rate)
+    return prepared.astype(np.float32)
+
+
+def _layer_outgoing_loop(
+    audio: np.ndarray,
+    sample_rate: int,
+    loop_seconds: float,
+    tail_seconds: float,
+) -> np.ndarray:
+    if audio.size < 64 or loop_seconds <= 0 or tail_seconds <= 0:
+        return audio
+    loop_samples = min(max(32, int(loop_seconds * sample_rate)), max(32, len(audio) // 3))
+    tail_samples = min(max(loop_samples, int(tail_seconds * sample_rate)), len(audio))
+    tail_start = len(audio) - tail_samples
+    source_end = min(len(audio), tail_start + loop_samples)
+    snippet = audio[max(0, source_end - loop_samples) : source_end].copy()
+    if snippet.size < 32:
+        return audio
+
+    edge = min(max(4, int(sample_rate * 0.012)), len(snippet) // 4)
+    if edge > 1:
+        snippet[:edge] *= np.linspace(0.0, 1.0, edge, dtype=np.float32)
+        snippet[-edge:] *= np.linspace(1.0, 0.0, edge, dtype=np.float32)
+    repeated = np.resize(snippet, tail_samples).astype(np.float32)
+    progress = np.linspace(0.0, 1.0, tail_samples, dtype=np.float32)
+    amount = 0.18 + (0.42 * np.sin(np.pi * progress))
+    layered = audio.copy()
+    layered[tail_start:] = (audio[tail_start:] * (1.0 - amount)) + (repeated * amount)
+    return layered.astype(np.float32)
+
+
+def _dj_blend_overlap(
+    outgoing: np.ndarray,
+    incoming: np.ndarray,
+    sample_rate: int,
+    transition: MixTransition | None = None,
+) -> np.ndarray:
     fade = min(len(outgoing), len(incoming))
     if fade == 0:
         return np.asarray([], dtype=np.float32)
 
     theta = np.linspace(0.0, np.pi / 2.0, fade, dtype=np.float32)
+    technique = transition.technique if transition else "phrase_blend"
     fade_out = np.cos(theta)
     fade_in = np.sin(theta)
+    if technique in {"phrase_blend", "loop_echo_out"}:
+        fade_out = np.clip(fade_out, 0.0, 1.0) ** 0.72
+        fade_in = fade_in**1.08
+    elif technique == "quick_cut":
+        progress = np.linspace(0.0, 1.0, fade, dtype=np.float32)
+        fade_out = np.clip(1.0 - (progress / 0.52), 0.0, 1.0)
+        fade_in = np.clip((progress - 0.16) / 0.48, 0.0, 1.0) ** 0.8
 
     out_low, out_high = _split_low_high(outgoing[:fade], sample_rate)
     in_low, in_high = _split_low_high(incoming[:fade], sample_rate)
 
     progress = np.linspace(0.0, 1.0, fade, dtype=np.float32)
-    outgoing_bass = np.clip(1.0 - (progress * 1.55), 0.0, 1.0)
-    incoming_bass = np.clip((progress - 0.35) / 0.65, 0.0, 1.0)
+    swap = transition.bass_swap_position if transition else 0.5
+    outgoing_bass = 1.0 - _smoothstep(progress, max(0.0, swap - 0.16), swap)
+    incoming_bass = _smoothstep(progress, swap, min(1.0, swap + 0.16))
     mids_out = fade_out * (1.0 - (0.12 * progress))
     mids_in = fade_in * (0.88 + (0.12 * progress))
 
     overlap = (out_high * mids_out) + (in_high * mids_in) + (out_low * outgoing_bass) + (in_low * incoming_bass)
     return _micro_duck(_prevent_clipping(overlap.astype(np.float32)))
+
+
+def _smoothstep(values: np.ndarray, edge_start: float, edge_end: float) -> np.ndarray:
+    width = max(edge_end - edge_start, 1e-6)
+    scaled = np.clip((values - edge_start) / width, 0.0, 1.0)
+    return (scaled * scaled * (3.0 - (2.0 * scaled))).astype(np.float32)
 
 
 def _split_low_high(audio: np.ndarray, sample_rate: int) -> tuple[np.ndarray, np.ndarray]:

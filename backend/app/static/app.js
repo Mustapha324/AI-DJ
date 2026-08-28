@@ -4,6 +4,25 @@ const analyzedTracks = new Map();
 const trackResearch = new Map();
 const liveQueue = [];
 const referenceMixes = new Map();
+const catalogGenres = new Set();
+const commonGenres = [
+  "Open Format",
+  "Pop",
+  "Electronic / Dance",
+  "House",
+  "Techno",
+  "Trance",
+  "Drum & Bass",
+  "Dubstep",
+  "Hip-Hop / Rap",
+  "R&B / Soul",
+  "Afrobeats / Amapiano",
+  "Latin",
+  "Reggae / Dancehall",
+  "Rock",
+  "Jazz",
+  "Country",
+];
 
 let liveSession = null;
 let draggedQueueId = null;
@@ -31,6 +50,7 @@ const els = {
   loadLibraryButton: document.getElementById("loadLibraryButton"),
   catalogSearchButton: document.getElementById("catalogSearchButton"),
   catalogSearch: document.getElementById("catalogSearch"),
+  genreFilter: document.getElementById("genreFilter"),
   catalogResults: document.getElementById("catalogResults"),
   audioUrlInput: document.getElementById("audioUrlInput"),
   importUrlButton: document.getElementById("importUrlButton"),
@@ -90,8 +110,13 @@ els.liveMixButton.addEventListener("click", () => makeMix({ live: true }));
 els.downloadMixButton.addEventListener("click", () => makeMix({ live: false }));
 els.chooseReferenceButton.addEventListener("click", () => els.referenceInput.click());
 els.trainStyleButton.addEventListener("click", trainDJStyle);
-els.loadLibraryButton.addEventListener("click", () => searchCatalog(""));
+els.loadLibraryButton.addEventListener("click", () => {
+  els.catalogSearch.value = "";
+  els.genreFilter.value = "";
+  searchCatalog("");
+});
 els.catalogSearchButton.addEventListener("click", () => searchCatalog(els.catalogSearch.value));
+els.genreFilter.addEventListener("change", () => searchCatalog(els.catalogSearch.value));
 els.importUrlButton.addEventListener("click", importAudioUrl);
 els.researchLibraryButton.addEventListener("click", researchLibrary);
 els.catalogSearch.addEventListener("keydown", (event) => {
@@ -202,9 +227,10 @@ async function addFiles(files) {
         type: "track",
         trackId: track.track_id,
         name: track.title || track.file_name,
-        meta: `${formatBpm(track.estimated_bpm)} - ${track.key?.display_name || "Unknown key"}`,
+        meta: formatTrackMeta(track),
       });
     }
+    updateGenreOptions(tracks);
 
     setStatus("Building DJ cue research", 68);
     const researchRecords = await Promise.all(
@@ -312,8 +338,15 @@ async function readEntry(entry) {
 async function searchCatalog(query) {
   try {
     setStatus("Searching library", 12);
-    const params = query.trim() ? `?query=${encodeURIComponent(query.trim())}` : "";
-    const results = await fetchJson(`/api/tracks/search${params}`);
+    const params = new URLSearchParams();
+    if (query.trim()) {
+      params.set("query", query.trim());
+    }
+    if (els.genreFilter.value) {
+      params.set("genre", els.genreFilter.value);
+    }
+    const queryString = params.toString();
+    const results = await fetchJson(`/api/tracks/search${queryString ? `?${queryString}` : ""}`);
     renderCatalogResults(results);
     setStatus(results.length ? "Library results ready" : "No saved matches", results.length ? 20 : 0);
   } catch (error) {
@@ -324,6 +357,7 @@ async function searchCatalog(query) {
 async function loadInitialLibrary() {
   try {
     const results = await fetchJson("/api/tracks/search");
+    updateGenreOptions(results);
     renderCatalogResults(results);
   } catch {
     renderCatalogResults([]);
@@ -352,15 +386,79 @@ function renderCatalogResults(results) {
     item.innerHTML = `
       <div>
         <strong>${escapeHtml(track.title || track.file_name)}</strong>
-        <div class="catalog-meta">${formatBpm(track.estimated_bpm)} - ${escapeHtml(track.key?.display_name || "Unknown key")} - ${formatDuration(track.duration_seconds)}</div>
+        <div class="catalog-meta">${escapeHtml(formatTrackMeta(track))} - ${formatDuration(track.duration_seconds)}</div>
       </div>
-      <button type="button" class="small-button">${isSelected ? "Added" : "Add"}</button>
+      <div class="catalog-actions">
+        <label class="genre-editor-label">
+          <span>Genre</span>
+          <select class="genre-editor" aria-label="Genre for ${escapeHtml(track.title || track.file_name)}">
+            ${genreOptionsHtml(track.genre)}
+          </select>
+        </label>
+        <button type="button" class="small-button">${isSelected ? "Added" : "Add"}</button>
+      </div>
     `;
     const button = item.querySelector("button");
+    const genreEditor = item.querySelector(".genre-editor");
     button.disabled = isSelected;
     button.addEventListener("click", () => addLibraryTrack(track, results));
+    genreEditor.addEventListener("change", () => updateTrackGenre(track, genreEditor.value));
     els.catalogResults.appendChild(item);
   }
+}
+
+function genreOptionsHtml(currentGenre) {
+  const genres = new Set(commonGenres);
+  if (currentGenre) {
+    genres.add(currentGenre);
+  }
+  return Array.from(genres)
+    .sort((left, right) => left.localeCompare(right))
+    .map((genre) => `<option value="${escapeHtml(genre)}"${genre === currentGenre ? " selected" : ""}>${escapeHtml(genre)}</option>`)
+    .join("");
+}
+
+async function updateTrackGenre(track, genre) {
+  try {
+    setStatus("Saving genre", 16);
+    const updated = await fetchJson(`/api/tracks/${encodeURIComponent(track.track_id)}/genre`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ genre }),
+    });
+    catalogGenres.add(updated.genre);
+    if (selectedLibraryTracks.has(updated.track_id)) {
+      selectedLibraryTracks.set(updated.track_id, updated);
+      renderTrackList();
+    }
+    const queueEntry = trackQueue.find((entry) => entry.trackId === updated.track_id);
+    if (queueEntry) {
+      queueEntry.track = updated;
+      renderQueue();
+    }
+    updateGenreOptions([updated]);
+    await searchCatalog(els.catalogSearch.value);
+    setStatus("Genre saved", 20);
+  } catch (error) {
+    showErrors([{ file_name: track.file_name, error: error.message || "Could not save the genre." }]);
+  }
+}
+
+function updateGenreOptions(tracks) {
+  const selected = els.genreFilter.value;
+  for (const track of tracks) {
+    if (track.genre) {
+      catalogGenres.add(track.genre);
+    }
+  }
+  els.genreFilter.innerHTML = '<option value="">All genres</option>';
+  for (const genre of Array.from(catalogGenres).sort((left, right) => left.localeCompare(right))) {
+    const option = document.createElement("option");
+    option.value = genre;
+    option.textContent = genre;
+    els.genreFilter.appendChild(option);
+  }
+  els.genreFilter.value = catalogGenres.has(selected) ? selected : "";
 }
 
 function renderReferenceMixes() {
@@ -449,7 +547,7 @@ function addLibraryTrack(track, catalogResults) {
     type: "track",
     trackId: track.track_id,
     name: track.title || track.file_name,
-    meta: `${formatBpm(track.estimated_bpm)} - ${track.key?.display_name || "Unknown key"}`,
+    meta: formatTrackMeta(track),
   });
   renderTracks();
   renderQueue();
@@ -495,12 +593,13 @@ async function importAudioUrl() {
     });
     selectedLibraryTracks.set(track.track_id, track);
     analyzedTracks.set(track.track_id, track);
+    updateGenreOptions([track]);
     ensureQueueItem({
       id: `track:${track.track_id}`,
       type: "track",
       trackId: track.track_id,
       name: track.title || track.file_name,
-      meta: `${formatBpm(track.estimated_bpm)} - ${track.key?.display_name || "Unknown key"}`,
+      meta: formatTrackMeta(track),
     });
     els.audioUrlInput.value = "";
     renderTracks();
@@ -573,6 +672,7 @@ function renderTracks() {
         <span>${formatBpm(track.estimated_bpm)}</span>
         <span>${escapeHtml(track.key?.display_name || "Unknown key")}</span>
         <span>${formatDuration(track.duration_seconds)}</span>
+        <span class="genre-badge">${escapeHtml(track.genre || "Open Format")}</span>
         <span>Energy ${formatEnergy(track.overall_rms_energy)}</span>
         ${
           playWindow
@@ -1118,7 +1218,7 @@ function queueOrderedByPlan(plan, fileTrackIdsByQueueId, tracks) {
       trackId,
       bpm: track?.estimated_bpm || item.bpm || null,
       keyName: track?.key?.display_name || item.keyName || null,
-      meta: track ? `${formatBpm(track.estimated_bpm)} - ${track.key?.display_name || "Unknown key"}` : item.meta,
+      meta: track ? formatTrackMeta(track) : item.meta,
     });
   }
 
@@ -1174,6 +1274,9 @@ async function startBrowserLiveMix(queueItems, plan = null) {
     currentSource: null,
     currentGain: null,
     currentChannel: null,
+    currentStartedAt: null,
+    currentStartOffset: 0,
+    currentPlaybackRate: 1,
     timers: [],
     activeSources: new Set(),
     playing: false,
@@ -1280,6 +1383,9 @@ function playLiveTrackAtIndex(index, fadeInSeconds) {
   liveSession.currentSource = source;
   liveSession.currentGain = channel.gain;
   liveSession.currentChannel = channel;
+  liveSession.currentStartedAt = now;
+  liveSession.currentStartOffset = offset;
+  liveSession.currentPlaybackRate = 1;
   liveSession.playing = true;
   liveSession.transitioning = false;
 
@@ -1338,6 +1444,8 @@ function transitionToNextTrack(manual) {
   const nextTrack = liveSession.decodedQueue[nextIndex];
   const currentTrack = liveSession.decodedQueue[liveSession.currentIndex];
   const transition = transitionSecondsBetween(currentTrack, nextTrack);
+  const plannedTransition = plannedTransitionBetween(currentTrack, nextTrack);
+  const technique = plannedTransition?.technique || "phrase_blend";
   const transitionEffects = liveTransitionEffects(currentTrack, nextTrack);
   const playbackRate = aiPlaybackRateForNext(nextTrack);
   const nextOffset = liveTrackStartOffset(nextTrack);
@@ -1352,20 +1460,23 @@ function transitionToNextTrack(manual) {
   nextSource.playbackRate.setValueAtTime(playbackRate, now);
   nextSource.connect(nextChannel.eq);
   nextChannel.gain.gain.setValueAtTime(0.0001, now);
-  scheduleEqualPowerFade(nextChannel.gain.gain, now, transition, true);
-  nextChannel.eq.gain.linearRampToValueAtTime(0, now + transition * 0.7);
+  scheduleEqualPowerFade(nextChannel.gain.gain, now, transition, true, technique);
+  const bassSwap = Math.max(0.15, Math.min(0.85, plannedTransition?.bass_swap_position || 0.5));
+  nextChannel.eq.gain.linearRampToValueAtTime(-10, now + transition * bassSwap);
+  nextChannel.eq.gain.linearRampToValueAtTime(0, now + transition * Math.min(1, bassSwap + 0.18));
   nextSource.start(now, nextOffset, livePlaybackDuration(nextTrack, nextWindow, transition, playbackRate));
   liveSession.activeSources.add(nextSource);
 
   if (liveSession.currentGain) {
     liveSession.currentGain.gain.cancelScheduledValues(now);
-    scheduleEqualPowerFade(liveSession.currentGain.gain, now, transition, false);
+    scheduleEqualPowerFade(liveSession.currentGain.gain, now, transition, false, technique);
   }
   if (liveSession.currentChannel) {
     liveSession.currentChannel.eq.gain.cancelScheduledValues(now);
     liveSession.currentChannel.eq.gain.setValueAtTime(0, now);
-    liveSession.currentChannel.eq.gain.linearRampToValueAtTime(-14, now + transition * 0.55);
+    liveSession.currentChannel.eq.gain.linearRampToValueAtTime(-18, now + transition * bassSwap);
   }
+  const loopBed = scheduleOutgoingLoopBed(currentTrack, now, transition, plannedTransition);
   if (liveSession.currentSource) {
     const oldSource = liveSession.currentSource;
     liveSession.timers.push(
@@ -1376,7 +1487,7 @@ function transitionToNextTrack(manual) {
           // Source may already be stopped.
         }
         liveSession?.activeSources?.delete(oldSource);
-      }, transition * 1000 + 80),
+      }, (loopBed ? Math.min(0.45, transition * 0.18) : transition) * 1000 + 80),
     );
   }
 
@@ -1401,6 +1512,9 @@ function transitionToNextTrack(manual) {
   liveSession.currentSource = nextSource;
   liveSession.currentGain = nextChannel.gain;
   liveSession.currentChannel = nextChannel;
+  liveSession.currentStartedAt = now;
+  liveSession.currentStartOffset = nextOffset;
+  liveSession.currentPlaybackRate = playbackRate;
   liveSession.timers.push(
     window.setTimeout(() => {
       if (liveSession?.currentSource === nextSource) {
@@ -1409,7 +1523,7 @@ function transitionToNextTrack(manual) {
     }, transition * 1000 + 120),
   );
   liveSession.timers.push(window.setTimeout(() => transitionToNextTrack(false), Math.max(1000, nextWindow * 1000)));
-  setStatus(manual ? "Manual transition" : "AI transition", 52);
+  setStatus(`${manual ? "Manual" : "AI"} ${transitionTechniqueLabel(technique)}`, 52);
   renderQueue();
 }
 
@@ -1472,13 +1586,21 @@ function createLiveChannel(context, now, initialBassDb = 0) {
   return { eq, gain, delay, feedback, delayWet };
 }
 
-function scheduleEqualPowerFade(gainParam, startTime, duration, fadeIn) {
-  const steps = 14;
+function scheduleEqualPowerFade(gainParam, startTime, duration, fadeIn, technique = "phrase_blend") {
+  const steps = 24;
   gainParam.cancelScheduledValues(startTime);
   gainParam.setValueAtTime(fadeIn ? 0.0001 : 1.0, startTime);
   for (let step = 1; step <= steps; step += 1) {
     const progress = step / steps;
-    const curve = fadeIn ? Math.sin(progress * Math.PI * 0.5) : Math.cos(progress * Math.PI * 0.5);
+    let curve = fadeIn ? Math.sin(progress * Math.PI * 0.5) : Math.cos(progress * Math.PI * 0.5);
+    if (!fadeIn && ["phrase_blend", "loop_echo_out"].includes(technique)) {
+      curve = curve ** 0.72;
+    }
+    if (technique === "quick_cut") {
+      curve = fadeIn
+        ? Math.max(0.0001, Math.min(1, (progress - 0.12) / 0.48))
+        : Math.max(0.0001, 1 - progress / 0.52);
+    }
     gainParam.linearRampToValueAtTime(Math.max(0.0001, curve), startTime + duration * progress);
   }
 }
@@ -1887,6 +2009,59 @@ function formatBytes(bytes) {
 
 function formatBpm(bpm) {
   return bpm ? `${Math.round(bpm)} BPM` : "No BPM";
+}
+
+function scheduleOutgoingLoopBed(track, transitionStart, transitionSeconds, planned) {
+  const loopSeconds = Number(planned?.outgoing_loop_seconds || 0);
+  if (!liveSession || !track?.buffer || loopSeconds <= 0 || transitionSeconds < 2) {
+    return null;
+  }
+
+  const { context } = liveSession;
+  const elapsed = Math.max(0, transitionStart - Number(liveSession.currentStartedAt || transitionStart));
+  const playbackRate = Math.max(0.1, Number(liveSession.currentPlaybackRate || 1));
+  const playhead = Math.min(
+    track.buffer.duration - 0.05,
+    Number(liveSession.currentStartOffset || 0) + elapsed * playbackRate,
+  );
+  const loopEnd = Math.max(loopSeconds, playhead);
+  const loopStart = Math.max(0, loopEnd - loopSeconds);
+  if (loopEnd - loopStart < 0.1) {
+    return null;
+  }
+
+  const source = context.createBufferSource();
+  const channel = createLiveChannel(context, transitionStart, -18);
+  source.buffer = track.buffer;
+  source.loop = true;
+  source.loopStart = loopStart;
+  source.loopEnd = loopEnd;
+  source.playbackRate.setValueAtTime(playbackRate, transitionStart);
+  source.connect(channel.eq);
+  channel.gain.gain.setValueAtTime(0.0001, transitionStart);
+  channel.gain.gain.linearRampToValueAtTime(0.24, transitionStart + Math.min(0.35, transitionSeconds * 0.12));
+  channel.gain.gain.setValueAtTime(0.24, transitionStart + transitionSeconds * 0.55);
+  channel.gain.gain.exponentialRampToValueAtTime(0.0001, transitionStart + transitionSeconds);
+  scheduleBrowserChannelEffects(channel, transitionStart, transitionSeconds, planned?.sfx || ["echo_tail"]);
+  source.start(transitionStart, loopStart);
+  source.stop(transitionStart + transitionSeconds + 0.08);
+  liveSession.activeSources.add(source);
+  source.addEventListener("ended", () => liveSession?.activeSources?.delete(source));
+  return source;
+}
+
+function transitionTechniqueLabel(technique) {
+  return {
+    phrase_blend: "phrase blend",
+    bass_swap: "bass-swap blend",
+    loop_echo_out: "loop-and-echo blend",
+    drop_swap: "drop swap",
+    quick_cut: "quick cut",
+  }[technique] || "transition";
+}
+
+function formatTrackMeta(track) {
+  return `${track.genre || "Open Format"} - ${formatBpm(track.estimated_bpm)} - ${track.key?.display_name || "Unknown key"}`;
 }
 
 function formatDuration(seconds) {

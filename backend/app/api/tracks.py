@@ -4,10 +4,18 @@ from fastapi.responses import FileResponse
 from app.analyzer.track_analyzer import AudioAnalysisError, TrackAnalyzer
 from app.api.jobs import get_job_service
 from app.config import settings
-from app.models.track import BatchAnalyzeResponse, TrackAnalysis, TrackCompatibility, TrackImportUrlRequest, TrackSummary
+from app.models.track import (
+    BatchAnalyzeResponse,
+    TrackAnalysis,
+    TrackCompatibility,
+    TrackGenreUpdateRequest,
+    TrackImportUrlRequest,
+    TrackSummary,
+)
 from app.models.song_research import MusicSourceRecommendation, SongResearchRecord
 from app.services.batch_analyzer import BatchAnalyzer, BatchLimitError
 from app.services.compatibility import CompatibilityService
+from app.services.genre_service import classify_track_genre
 from app.services.job_service import JobService
 from app.services.song_research_service import SongResearchService
 from app.services.track_service import InvalidAudioFileError, TrackNotFoundError, TrackService
@@ -50,6 +58,7 @@ async def analyze_track(
             track_id=track_id,
             original_file_name=saved_upload.safe_file_name,
         )
+        classify_track_genre(analysis, saved_upload.path)
         analysis.content_hash = saved_upload.content_hash
         analysis.file_size_bytes = saved_upload.size_bytes
         duplicate = track_service.find_duplicate_by_analysis(analysis)
@@ -121,6 +130,7 @@ async def import_track_from_url(
             track_id=track_id,
             original_file_name=saved_upload.safe_file_name,
         )
+        classify_track_genre(analysis, saved_upload.path)
         analysis.content_hash = saved_upload.content_hash
         analysis.file_size_bytes = saved_upload.size_bytes
         duplicate = track_service.find_duplicate_by_analysis(analysis)
@@ -166,9 +176,22 @@ def legal_music_sources(
 @router.get("/search", response_model=list[TrackSummary])
 def search_tracks(
     query: str | None = Query(default=None, max_length=120),
+    genre: str | None = Query(default=None, max_length=64),
     track_service: TrackService = Depends(get_track_service),
 ) -> list[TrackSummary]:
-    return track_service.search_tracks(query)
+    return track_service.search_tracks(query, genre=genre)
+
+
+@router.patch("/{track_id}/genre", response_model=TrackAnalysis)
+def update_track_genre(
+    track_id: str,
+    request: TrackGenreUpdateRequest,
+    track_service: TrackService = Depends(get_track_service),
+) -> TrackAnalysis:
+    try:
+        return track_service.update_genre(track_id, request.genre)
+    except TrackNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
 
 
 @router.get("/{track_id}/compatible", response_model=list[TrackCompatibility])

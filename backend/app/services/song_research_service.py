@@ -337,13 +337,25 @@ def _likely_genres(track: TrackAnalysis) -> list[str]:
     bpm = track.estimated_bpm or 0.0
     title = f"{track.title} {track.file_name}".lower()
     genres: list[str] = []
+    tagged_genre = (track.genre or "").strip().lower()
+    if tagged_genre and tagged_genre != "open format":
+        if "house" in tagged_genre:
+            genres.append("club/house")
+        if any(word in tagged_genre for word in ("dance", "electronic", "techno", "trance", "dubstep", "drum & bass")):
+            genres.append("dance")
+        if "pop" in tagged_genre:
+            genres.append("pop")
+        if any(word in tagged_genre for word in ("hip-hop", "hip hop", "rap")):
+            genres.append("hip-hop")
+        if not genres:
+            genres.append(tagged_genre)
     if 118 <= bpm <= 132:
         genres.append("club/house")
     if 100 <= bpm < 118 or any(word in title for word in ("pop", "radio", "top")):
         genres.append("pop")
     if any(word in title for word in ("house", "club", "dance", "edm")):
         genres.append("dance")
-    return genres or ["open-format"]
+    return list(dict.fromkeys(genres)) or ["open-format"]
 
 
 def _external_notes(track: TrackAnalysis) -> list[ExternalResearchNote]:

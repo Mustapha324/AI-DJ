@@ -15,6 +15,7 @@ def test_party_mode_page_loads(client):
     assert "Party Mode" in response.text
     assert "Studio Mode" in response.text
     assert 'class="turntable-visual"' in response.text
+    assert 'id="genreFilter"' in response.text
     assert "/docs" in response.text
 
 
@@ -25,6 +26,7 @@ def test_live_deck_effects_cannot_break_the_transition(client):
     assert "function scheduleBrowserImpact(context, impactTime)" in response.text
     assert "scheduleBrowserImpact(context, transitionStart + transitionSeconds - 0.04)" in response.text
     assert 'console.warn("A live DJ effect was skipped so the transition could continue."' in response.text
+    assert "function scheduleOutgoingLoopBed(track, transitionStart, transitionSeconds, planned)" in response.text
 
 
 def test_invalid_file_type(client):
@@ -50,6 +52,8 @@ def test_analyze_track_and_retrieve_saved_track(client, synthetic_wav_bytes):
     assert analysis["title"] == "test song"
     assert analysis["duration_seconds"] > 0
     assert analysis["energy_curve"]
+    assert analysis["genre"]
+    assert analysis["genre_source"] in {"embedded", "filename", "audio_profile", "fallback"}
     assert analysis["beats"]["beat_count"] == len(analysis["beats"]["beat_timestamps"])
 
     get_response = client.get(f"/api/tracks/{track_id}")
@@ -219,6 +223,44 @@ def test_search_tracks_returns_saved_library_matches(client, synthetic_mp3_named
     results = response.json()
     assert len(results) == 1
     assert results[0]["file_name"] == "alpha.mp3"
+
+
+def test_library_can_filter_tracks_by_automatic_genre(client, make_synthetic_wav_bytes):
+    uploads = [
+        ("deep-house-groove.mp3", make_synthetic_wav_bytes(330.0), "audio/mpeg"),
+        ("late-night-jazz.mp3", make_synthetic_wav_bytes(550.0), "audio/mpeg"),
+    ]
+    upload_response = client.post(
+        "/api/tracks/analyze-batch",
+        files=[("files", upload) for upload in uploads],
+    )
+    assert upload_response.status_code == 201
+
+    response = client.get("/api/tracks/search", params={"genre": "House"})
+
+    assert response.status_code == 200
+    results = response.json()
+    assert len(results) == 1
+    assert results[0]["genre"] == "House"
+    assert results[0]["genre_source"] == "filename"
+
+
+def test_library_genre_can_be_corrected_and_filtered(client, make_synthetic_wav_bytes):
+    upload_response = client.post(
+        "/api/tracks/analyze",
+        files={"file": ("uncertain-track.mp3", make_synthetic_wav_bytes(440.0), "audio/mpeg")},
+    )
+    track_id = upload_response.json()["track_id"]
+
+    update_response = client.patch(f"/api/tracks/{track_id}/genre", json={"genre": "Alternative R&B"})
+
+    assert update_response.status_code == 200
+    updated = update_response.json()
+    assert updated["genre"] == "Alternative R&B"
+    assert updated["genre_source"] == "manual"
+    assert updated["genre_confidence"] == 1.0
+    filtered = client.get("/api/tracks/search", params={"genre": "Alternative R&B"}).json()
+    assert [track["track_id"] for track in filtered] == [track_id]
 
 
 def test_song_research_returns_cues_and_pairings(client, synthetic_mp3_named_uploads):

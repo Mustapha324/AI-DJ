@@ -40,7 +40,8 @@ body {
 
 button,
 input,
-textarea {
+textarea,
+select {
   font: inherit;
 }
 
@@ -382,6 +383,27 @@ textarea::placeholder {
   color: #74747d;
 }
 
+.genre-filter {
+  margin-top: 8px;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 9px;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.genre-filter select {
+  min-width: 0;
+  min-height: 36px;
+  padding: 0 9px;
+}
+
+.genre-badge {
+  color: var(--accent);
+  border-color: rgba(101, 234, 209, 0.28) !important;
+}
+
 .search-row input {
   min-width: 0;
   min-height: 40px;
@@ -434,6 +456,25 @@ textarea {
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 8px;
   align-items: center;
+}
+
+.catalog-actions {
+  display: flex;
+  align-items: end;
+  gap: 7px;
+}
+
+.genre-editor-label {
+  display: grid;
+  gap: 3px;
+  color: var(--muted);
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.genre-editor {
+  max-width: 150px;
 }
 
 .catalog-item strong,

@@ -41,6 +41,12 @@ def test_mix_plan_creation_and_transition_timing(client, synthetic_mp3_named_upl
         assert transition["target_transition_start"] >= 0.0
         assert transition["target_transition_end"] > transition["target_transition_start"]
         assert transition["duration_seconds"] > 0
+        assert transition["technique"] in {"phrase_blend", "bass_swap", "loop_echo_out", "drop_swap", "quick_cut"}
+        assert 0.15 <= transition["bass_swap_position"] <= 0.85
+        assert transition["background_tail_seconds"] >= 0
+        if transition["technique"] == "loop_echo_out":
+            assert transition["outgoing_loop_beats"] in {2, 4}
+            assert transition["outgoing_loop_seconds"] > 0
         assert transition["sfx"][0] == "filter_sweep"
         assert "echo_tail" in transition["sfx"]
         assert "reverb_riser" in transition["sfx"]

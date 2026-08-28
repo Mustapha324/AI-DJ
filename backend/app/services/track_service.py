@@ -13,6 +13,7 @@ from fastapi import UploadFile
 
 from app.config import Settings, ensure_storage_dirs
 from app.models.track import TrackAnalysis, TrackSummary
+from app.services.genre_service import classify_track_genre
 
 
 class InvalidAudioFileError(Exception):
@@ -180,6 +181,9 @@ class TrackService:
                 track_id=analysis.track_id,
                 title=analysis.title,
                 file_name=analysis.file_name,
+                genre=analysis.genre,
+                genre_source=analysis.genre_source,
+                genre_confidence=analysis.genre_confidence,
                 duration_seconds=analysis.duration_seconds,
                 estimated_bpm=analysis.estimated_bpm,
                 key=analysis.key,
@@ -190,9 +194,12 @@ class TrackService:
             for analysis in self.list_analyses()
         ]
 
-    def search_tracks(self, query: str | None = None) -> list[TrackSummary]:
+    def search_tracks(self, query: str | None = None, genre: str | None = None) -> list[TrackSummary]:
         tracks = self.list_tracks()
         cleaned_query = " ".join((query or "").lower().split())
+        cleaned_genre = " ".join((genre or "").lower().split())
+        if cleaned_genre:
+            tracks = [track for track in tracks if track.genre.lower() == cleaned_genre]
         if not cleaned_query:
             return tracks
 
@@ -203,6 +210,7 @@ class TrackService:
                 [
                     track.title,
                     track.file_name,
+                    track.genre,
                     track.key.root,
                     track.key.mode,
                     track.key.display_name,
@@ -257,6 +265,17 @@ class TrackService:
         except (OSError, json.JSONDecodeError, ValueError) as exc:
             raise TrackNotFoundError(f"Track '{track_id}' could not be loaded.") from exc
 
+    def update_genre(self, track_id: str, genre: str) -> TrackAnalysis:
+        analysis = self.get_analysis(track_id)
+        cleaned_genre = " ".join(genre.split()).strip()
+        if not cleaned_genre:
+            raise ValueError("Choose a genre before saving.")
+        analysis.genre = cleaned_genre[:64]
+        analysis.genre_source = "manual"
+        analysis.genre_confidence = 1.0
+        self.save_analysis(analysis)
+        return analysis
+
     def get_uploaded_audio_path(self, track_id: str) -> Path:
         if not _is_valid_track_id(track_id):
             raise TrackNotFoundError(f"Track '{track_id}' was not found.")
@@ -273,7 +292,10 @@ class TrackService:
     def _load_analysis_file(path: Path) -> TrackAnalysis:
         with path.open("r", encoding="utf-8") as input_file:
             data = json.load(input_file)
-        return TrackAnalysis.model_validate(data)
+        analysis = TrackAnalysis.model_validate(data)
+        if analysis.genre_source == "unknown":
+            classify_track_genre(analysis)
+        return analysis
 
 
 def analyses_represent_same_song(left: TrackAnalysis, right: TrackAnalysis) -> bool:

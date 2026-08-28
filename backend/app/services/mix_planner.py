@@ -108,6 +108,7 @@ class MixPlanner:
                     track_id=track.track_id,
                     file_name=track.file_name,
                     title=track.title,
+                    genre=track.genre,
                     source_start_time=round(source_start, 3),
                     source_end_time=round(source_end, 3),
                     timeline_start_time=round(timeline_start, 3),
@@ -127,6 +128,25 @@ class MixPlanner:
                 )
                 bpm_adjustment = _bpm_adjustment_percent(track.bpm, next_track.bpm)
                 target_start = source_starts[index + 1]
+                technique = _transition_technique(
+                    track,
+                    next_track,
+                    compatibility.compatibility_score,
+                    request.mix_direction,
+                )
+                loop_beats = _outgoing_loop_beats(technique, transition_duration, track.bpm)
+                effects = _technique_effects(
+                    _sfx_for_transition(
+                        track,
+                        next_track,
+                        request.mix_direction,
+                        request.use_transition_sfx,
+                        active_style_profile,
+                        compatibility.compatibility_score,
+                    ),
+                    technique,
+                    request.use_transition_sfx,
+                )
                 transitions.append(
                     MixTransition(
                         source_track_id=track.track_id,
@@ -142,15 +162,14 @@ class MixPlanner:
                         gain_adjustment_db=_gain_adjustment_db(track.overall_energy, next_track.overall_energy),
                         crossfade_curve="equal_power",
                         transition_type="crossfade",
+                        technique=technique,
+                        phrase_aligned=_is_phrase_boundary(track, transition_start),
+                        outgoing_loop_beats=loop_beats,
+                        outgoing_loop_seconds=_loop_seconds(loop_beats, track.bpm),
+                        background_tail_seconds=_background_tail_seconds(technique, transition_duration),
+                        bass_swap_position=_bass_swap_position(technique),
                         compatibility_score=compatibility.compatibility_score,
-                        sfx=_sfx_for_transition(
-                            track,
-                            next_track,
-                            request.mix_direction,
-                            request.use_transition_sfx,
-                            active_style_profile,
-                            compatibility.compatibility_score,
-                        ),
+                        sfx=effects,
                     )
                 )
                 timeline_start = round(timeline_end - transition_duration, 3)
@@ -193,6 +212,7 @@ def _to_mixable_track(analysis: TrackAnalysis) -> MixableTrack:
         track_id=analysis.track_id,
         file_name=analysis.file_name,
         title=analysis.title,
+        genre=analysis.genre,
         duration_seconds=analysis.duration_seconds,
         bpm=analysis.estimated_bpm,
         key=analysis.key,
@@ -201,6 +221,82 @@ def _to_mixable_track(analysis: TrackAnalysis) -> MixableTrack:
         approximate_bars=analysis.beats.approximate_bars,
         energy_curve=analysis.energy_curve,
     )
+
+
+def _transition_technique(
+    source: MixableTrack,
+    target: MixableTrack,
+    compatibility_score: float,
+    mix_direction: str | None,
+) -> str:
+    direction = (mix_direction or "").lower()
+    tempo_delta = abs((source.bpm or 0.0) - (target.bpm or 0.0)) if source.bpm and target.bpm else 0.0
+    energy_delta = abs(source.overall_energy - target.overall_energy) / max(
+        source.overall_energy,
+        target.overall_energy,
+        1e-9,
+    )
+    genres = f"{source.genre} {target.genre}".lower()
+    dance_pair = any(word in genres for word in ("house", "techno", "trance", "dance", "electronic"))
+
+    if any(word in direction for word in ("quick", "hard cut", "scratch")):
+        return "quick_cut"
+    if compatibility_score < 0.68 or tempo_delta >= 6.0:
+        return "loop_echo_out"
+    if dance_pair and tempo_delta <= 4.0 and energy_delta <= 0.32:
+        return "bass_swap"
+    if target.overall_energy > source.overall_energy * 1.2:
+        return "drop_swap"
+    if any(word in direction for word in ("smooth", "long blend", "chill", "lounge")) or compatibility_score >= 0.8:
+        return "phrase_blend"
+    return "loop_echo_out"
+
+
+def _outgoing_loop_beats(technique: str, transition_duration: float, bpm: float | None) -> int:
+    if technique != "loop_echo_out" or transition_duration < 2.0:
+        return 0
+    beat_seconds = 60.0 / (bpm or 120.0)
+    return 4 if transition_duration >= beat_seconds * 6 else 2
+
+
+def _loop_seconds(loop_beats: int, bpm: float | None) -> float:
+    if loop_beats <= 0:
+        return 0.0
+    return round(loop_beats * (60.0 / (bpm or 120.0)), 3)
+
+
+def _background_tail_seconds(technique: str, transition_duration: float) -> float:
+    ratios = {
+        "phrase_blend": 0.68,
+        "bass_swap": 0.55,
+        "loop_echo_out": 0.78,
+        "drop_swap": 0.42,
+        "quick_cut": 0.2,
+    }
+    return round(min(12.0, transition_duration * ratios.get(technique, 0.55)), 3)
+
+
+def _bass_swap_position(technique: str) -> float:
+    return {
+        "phrase_blend": 0.48,
+        "bass_swap": 0.55,
+        "loop_echo_out": 0.38,
+        "drop_swap": 0.34,
+        "quick_cut": 0.24,
+    }.get(technique, 0.5)
+
+
+def _technique_effects(effects: list[str], technique: str, enabled: bool) -> list[str]:
+    if not enabled:
+        return []
+    additions = {
+        "phrase_blend": ["soft_sweep"],
+        "bass_swap": ["filter_sweep"],
+        "loop_echo_out": ["loop_roll", "echo_tail"],
+        "drop_swap": ["reverse_swell", "impact"],
+        "quick_cut": ["echo_freeze", "brake_cut"],
+    }.get(technique, [])
+    return _unique_effects([*effects, *additions])[:5]
 
 
 def _transition_duration_seconds(

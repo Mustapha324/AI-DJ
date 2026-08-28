@@ -10,6 +10,7 @@ from app.models.track import ApproximateBar, EnergyPoint, KeyEstimate
 
 TransitionType = Literal["crossfade"]
 CrossfadeCurve = Literal["equal_power", "linear"]
+TransitionTechnique = Literal["phrase_blend", "bass_swap", "loop_echo_out", "drop_swap", "quick_cut"]
 MixStatus = Literal["planned", "queued", "rendering", "completed", "failed"]
 OutputFormat = Literal["wav"]
 
@@ -18,6 +19,7 @@ class MixableTrack(BaseModel):
     track_id: str
     file_name: str
     title: str
+    genre: str = "Open Format"
     duration_seconds: float = Field(..., ge=0)
     bpm: float | None = Field(default=None, ge=0)
     key: KeyEstimate
@@ -51,6 +53,7 @@ class MixTrackPlacement(BaseModel):
     track_id: str
     file_name: str
     title: str
+    genre: str = "Open Format"
     source_start_time: float = Field(..., ge=0)
     source_end_time: float = Field(..., ge=0)
     timeline_start_time: float = Field(..., ge=0)
@@ -73,6 +76,12 @@ class MixTransition(BaseModel):
     gain_adjustment_db: float
     crossfade_curve: CrossfadeCurve
     transition_type: TransitionType
+    technique: TransitionTechnique = "phrase_blend"
+    phrase_aligned: bool = True
+    outgoing_loop_beats: int = Field(default=0, ge=0, le=16)
+    outgoing_loop_seconds: float = Field(default=0.0, ge=0, le=16)
+    background_tail_seconds: float = Field(default=0.0, ge=0, le=20)
+    bass_swap_position: float = Field(default=0.5, ge=0.15, le=0.85)
     compatibility_score: float = Field(..., ge=0, le=1)
     sfx: list[str] = Field(default_factory=list)
 

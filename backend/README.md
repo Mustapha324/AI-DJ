@@ -10,6 +10,8 @@ The original single-track analysis endpoint is still supported.
 - Party Mode browser interface at `/`
 - Studio Mode Swagger documentation at `/docs`
 - Search for already analyzed tracks by title, file name, BPM, or key
+- Automatic genre tagging from embedded metadata, file names, and a local audio-profile fallback
+- Genre badges and library filtering for large collections
 - Train a local DJ style profile from reference DJ mixes without adding them to the song queue
 - Single WAV/MP3 analysis through `POST /api/tracks/analyze`
 - Batch MP3 analysis through `POST /api/tracks/analyze-batch`
@@ -21,6 +23,7 @@ The original single-track analysis endpoint is still supported.
 - Browser-side live deck with a draggable queue, Play Next, Transition Now, and Stop Live controls
 - Excerpt-based mixing so long songs or full DJ sets do not have to play end to end
 - Real WAV rendering with phrase-aware cue points, bass-swap crossfades, gain normalization, fade-in/fade-out, and clipping prevention
+- Adaptive phrase blends, bass swaps, drop swaps, and beat-synced loop/echo outros that keep the outgoing song underneath the next track
 - Procedural transition SFX such as sweeps and downbeat impacts
 - Mix audio streaming through `GET /api/mixes/{mix_id}/audio`
 
@@ -69,8 +72,8 @@ Generated files in `uploads`, `analysis_output`, `mixes`, `jobs`, and `style_pro
 From PowerShell:
 
 ```powershell
-cd C:\Users\musta\OneDrive\Documents\GitHub\AI-DJ
-py -3.11 -m venv .venv
+cd C:\PCDev\GitHub\AI-DJ
+python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
 python -m pip install -r backend\requirements.txt
@@ -96,7 +99,7 @@ $env:AI_DJ_STYLE_PROFILES_DIR="C:\Path\To\style_profiles"
 ## Run The Backend
 
 ```powershell
-cd C:\Users\musta\OneDrive\Documents\GitHub\AI-DJ\backend
+cd C:\PCDev\GitHub\AI-DJ\backend
 ..\.venv\Scripts\python.exe -m uvicorn app.main:app --reload
 ```
 

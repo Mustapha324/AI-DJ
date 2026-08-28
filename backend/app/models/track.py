@@ -19,6 +19,8 @@ SectionType = Literal[
     "low_energy",
 ]
 
+GenreSource = Literal["embedded", "filename", "audio_profile", "fallback", "manual", "unknown"]
+
 
 class EnergyPoint(BaseModel):
     time: float = Field(..., ge=0)
@@ -64,6 +66,9 @@ class TrackAnalysis(BaseModel):
     track_id: str
     file_name: str
     title: str
+    genre: str = "Open Format"
+    genre_source: GenreSource = "unknown"
+    genre_confidence: float = Field(default=0.0, ge=0, le=1)
     duration_seconds: float = Field(..., ge=0)
     sample_rate: int = Field(..., gt=0)
     estimated_bpm: float | None = Field(default=None, ge=0)
@@ -86,6 +91,9 @@ class TrackSummary(BaseModel):
     track_id: str
     title: str
     file_name: str
+    genre: str = "Open Format"
+    genre_source: GenreSource = "unknown"
+    genre_confidence: float = Field(default=0.0, ge=0, le=1)
     duration_seconds: float
     estimated_bpm: float | None
     key: KeyEstimate
@@ -97,6 +105,10 @@ class TrackSummary(BaseModel):
 class TrackImportUrlRequest(BaseModel):
     url: str = Field(..., min_length=8, max_length=2048)
     file_name: str | None = Field(default=None, max_length=160)
+
+
+class TrackGenreUpdateRequest(BaseModel):
+    genre: str = Field(..., min_length=1, max_length=64)
 
 
 BatchTrackStatus = Literal["analyzed", "duplicate"]

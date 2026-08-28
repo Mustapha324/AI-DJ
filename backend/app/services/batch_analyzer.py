@@ -7,6 +7,7 @@ from fastapi import UploadFile
 from app.analyzer.track_analyzer import AudioAnalysisError, TrackAnalyzer
 from app.models.track import BatchAnalyzeResponse, BatchTrackError, BatchTrackResult
 from app.services.job_service import JobService
+from app.services.genre_service import classify_track_genre
 from app.services.track_service import InvalidAudioFileError, TrackService
 
 
@@ -74,6 +75,7 @@ class BatchAnalyzer:
                     track_id=track_id,
                     original_file_name=saved_upload.safe_file_name,
                 )
+                classify_track_genre(analysis, saved_upload.path)
                 analysis.content_hash = saved_upload.content_hash
                 analysis.file_size_bytes = saved_upload.size_bytes
                 duplicate = self.track_service.find_duplicate_by_analysis(analysis)
