@@ -23,7 +23,7 @@ The original single-track analysis endpoint is still supported.
 - Browser-side live deck with a draggable queue, Play Next, Transition Now, and Stop Live controls
 - Excerpt-based mixing so long songs or full DJ sets do not have to play end to end
 - Real WAV rendering with phrase-aware cue points, bass-swap crossfades, gain normalization, fade-in/fade-out, and clipping prevention
-- Match-aware rotation across clean fades, echo fades, filter blends, bass swaps, drop swaps, quick cuts, and beat-synced repeat/echo outros
+- Match-aware rotation across clean fades, safe tempo handoffs, echo fades, filter blends, bass swaps, drop swaps, quick cuts, and beat-synced repeat/echo outros
 - Procedural transition SFX such as sweeps and downbeat impacts
 - Mix audio streaming through `GET /api/mixes/{mix_id}/audio`
 

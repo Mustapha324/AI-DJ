@@ -3,8 +3,8 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from app.services.mix_planner import _adaptive_transition_target
-from app.services.mix_renderer import _repeat_with_crossfade
+from app.services.mix_planner import _adaptive_transition_target, _source_tempo_adjustment_percent
+from app.services.mix_renderer import _repeat_with_crossfade, _tempo_ramp_outgoing
 
 
 def _analyze_three_tracks(client, synthetic_mp3_named_uploads) -> list[str]:
@@ -22,6 +22,22 @@ def test_repeated_transition_loop_crossfades_its_seams():
 
     assert len(repeated) == 1200
     assert float(np.max(np.abs(np.diff(repeated)))) < 0.2
+
+
+def test_tempo_handoff_adjusts_song_one_only_within_a_safe_range():
+    adjustment = _source_tempo_adjustment_percent(120.0, 125.0)
+
+    assert adjustment == pytest.approx(4.1667, abs=0.001)
+    assert _source_tempo_adjustment_percent(100.0, 140.0) == 0.0
+
+
+def test_rendered_tempo_handoff_uses_a_gradual_speed_curve():
+    audio = np.sin(np.linspace(0.0, 24.0 * np.pi, 2400, dtype=np.float32))
+    ramped = _tempo_ramp_outgoing(audio, 4.0)
+
+    assert len(ramped) == len(audio)
+    assert np.isfinite(ramped).all()
+    assert not np.allclose(ramped, audio)
 
 
 def test_transition_time_adapts_to_the_song_pair():
@@ -44,6 +60,7 @@ def test_transition_time_adapts_to_the_song_pair():
         ("bass swap", "bass_swap"),
         ("drop into the next song", "drop_swap"),
         ("quick cut", "quick_cut"),
+        ("speed up song one to match song two", "tempo_handoff"),
     ],
 )
 def test_requested_transition_families_remain_available(
@@ -109,6 +126,7 @@ def test_mix_plan_creation_and_transition_timing(client, synthetic_mp3_named_upl
             "loop_echo_out",
             "drop_swap",
             "quick_cut",
+            "tempo_handoff",
         }
         assert 0.15 <= transition["bass_swap_position"] <= 0.85
         assert transition["background_tail_seconds"] >= 0

@@ -14,6 +14,7 @@ TransitionTechnique = Literal[
     "phrase_blend",
     "echo_fade",
     "filter_blend",
+    "tempo_handoff",
     "bass_swap",
     "loop_echo_out",
     "drop_swap",
@@ -81,6 +82,7 @@ class MixTransition(BaseModel):
     timeline_end_time: float = Field(..., ge=0)
     duration_seconds: float = Field(..., ge=0)
     bpm_adjustment_percent: float
+    source_tempo_adjustment_percent: float = 0.0
     gain_adjustment_db: float
     crossfade_curve: CrossfadeCurve
     transition_type: TransitionType

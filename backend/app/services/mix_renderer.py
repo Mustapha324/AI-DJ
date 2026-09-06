@@ -170,6 +170,8 @@ def _prepare_outgoing_transition(
     transition: MixTransition,
 ) -> np.ndarray:
     prepared = outgoing.copy()
+    if abs(transition.source_tempo_adjustment_percent) > 0.01:
+        prepared = _tempo_ramp_outgoing(prepared, transition.source_tempo_adjustment_percent)
     if transition.technique == "filter_blend":
         prepared = _filter_outgoing_transition(prepared, sample_rate)
     if transition.outgoing_loop_seconds > 0 and transition.background_tail_seconds > 0:
@@ -250,24 +252,23 @@ def _dj_blend_overlap(
     if fade == 0:
         return np.asarray([], dtype=np.float32)
 
-    theta = np.linspace(0.0, np.pi / 2.0, fade, dtype=np.float32)
     technique = transition.technique if transition else "phrase_blend"
-    fade_out = np.cos(theta)
-    fade_in = np.sin(theta)
-    if technique in {"phrase_blend", "echo_fade", "filter_blend", "loop_echo_out"}:
-        fade_out = np.clip(fade_out, 0.0, 1.0) ** 0.52
-        fade_in = fade_in**1.16
-    elif technique == "quick_cut":
-        progress = np.linspace(0.0, 1.0, fade, dtype=np.float32)
+    progress = np.linspace(0.0, 1.0, fade, dtype=np.float32)
+    if technique == "quick_cut":
         shifted = np.clip((progress - 0.08) / 0.84, 0.0, 1.0)
         eased = shifted * shifted * (3.0 - (2.0 * shifted))
         fade_out = 1.0 - eased
         fade_in = eased
+    else:
+        intro = _smoothstep(progress, 0.0, 0.3)
+        handoff = _smoothstep(progress, 0.3, 1.0)
+        fade_in = (0.1 * intro) + (0.9 * handoff)
+        fade_start = 0.2 if technique in {"phrase_blend", "tempo_handoff", "loop_echo_out"} else 0.16
+        fade_out = 1.0 - _smoothstep(progress, fade_start, 0.95)
 
     out_low, out_high = _split_low_high(outgoing[:fade], sample_rate)
     in_low, in_high = _split_low_high(incoming[:fade], sample_rate)
 
-    progress = np.linspace(0.0, 1.0, fade, dtype=np.float32)
     swap = transition.bass_swap_position if transition else 0.5
     handoff_start = max(0.0, swap - 0.13)
     handoff_end = min(1.0, swap + 0.13)
@@ -306,6 +307,27 @@ def _filter_outgoing_transition(audio: np.ndarray, sample_rate: int) -> np.ndarr
     low_curve = 1.0 - (0.18 * progress)
     high_curve = 1.0 - (0.78 * high_reduction)
     return ((low * low_curve) + (high * high_curve)).astype(np.float32)
+
+
+def _tempo_ramp_outgoing(audio: np.ndarray, adjustment_percent: float) -> np.ndarray:
+    if audio.size < 64 or abs(adjustment_percent) <= 0.01:
+        return audio
+    target_rate = 1.0 + (adjustment_percent / 100.0)
+    if target_rate < 0.94 or target_rate > 1.06:
+        return audio
+
+    progress = np.linspace(0.0, 1.0, len(audio), dtype=np.float64)
+    eased = progress * progress * (3.0 - (2.0 * progress))
+    rates = 1.0 + ((target_rate - 1.0) * eased)
+    source_positions = np.cumsum(rates, dtype=np.float64) - rates[0]
+    ramped = np.interp(
+        source_positions,
+        np.arange(len(audio), dtype=np.float64),
+        audio.astype(np.float64),
+        left=0.0,
+        right=0.0,
+    )
+    return ramped.astype(np.float32)
 
 
 def _micro_duck(audio: np.ndarray) -> np.ndarray:

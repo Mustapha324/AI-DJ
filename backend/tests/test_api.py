@@ -30,8 +30,11 @@ def test_live_deck_effects_cannot_break_the_transition(client):
     assert "function scheduleOutgoingLoopBed(track, transitionStart, transitionSeconds, planned)" in response.text
     assert "function scheduleBassHandoff(gainParam, startTime, duration, swapPosition, incoming)" in response.text
     assert "function scheduleTechniqueFilters(outgoingChannel, incomingChannel" in response.text
+    assert "function scheduleTempoHandoff(source, currentRate, currentTrack, nextTrack" in response.text
     assert 'echo_fade: "echo fade"' in response.text
     assert 'filter_blend: "filter blend"' in response.text
+    assert 'tempo_handoff: "tempo handoff"' in response.text
+    assert "value = (0.1 * introEase) + (0.9 * handoffEase);" in response.text
     assert "gainParam.setValueCurveAtTime(curve" in response.text
     assert "oldSource.stop(now + transition" in response.text
     assert "Math.min(0.45, transition * 0.18)" not in response.text

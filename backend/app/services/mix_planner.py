@@ -146,7 +146,16 @@ class MixPlanner:
                 transition_start = round(max(source_start, source_end - transition_duration), 3)
                 transition_end = round(source_end, 3)
                 compatibility, technique, _ = pair_decisions[index]
-                bpm_adjustment = _bpm_adjustment_percent(track.bpm, next_track.bpm)
+                bpm_adjustment = (
+                    0.0
+                    if technique == "tempo_handoff"
+                    else _bpm_adjustment_percent(track.bpm, next_track.bpm)
+                )
+                source_tempo_adjustment = (
+                    _source_tempo_adjustment_percent(track.bpm, next_track.bpm)
+                    if technique == "tempo_handoff"
+                    else 0.0
+                )
                 target_start = source_starts[index + 1]
                 loop_beats = _outgoing_loop_beats(technique, transition_duration, track.bpm)
                 effects = _technique_effects(
@@ -173,6 +182,7 @@ class MixPlanner:
                         timeline_end_time=timeline_end,
                         duration_seconds=round(transition_duration, 3),
                         bpm_adjustment_percent=bpm_adjustment,
+                        source_tempo_adjustment_percent=source_tempo_adjustment,
                         gain_adjustment_db=_gain_adjustment_db(track.overall_energy, next_track.overall_energy),
                         crossfade_curve="equal_power",
                         transition_type="crossfade",
@@ -288,11 +298,15 @@ def _transition_candidates(
     vocal_pair = any(word in source_genre for word in vocal_words) or any(
         word in target_genre for word in vocal_words
     )
+    tempo_ratio = (target.bpm / source.bpm) if source.bpm and target.bpm else 1.0
+    tempo_handoff_safe = 0.94 <= tempo_ratio <= 1.06
 
     if any(word in direction for word in ("quick", "hard cut", "scratch")):
         return ["quick_cut"]
     if any(word in direction for word in ("repeat", "loop")):
         return ["loop_echo_out"]
+    if any(word in direction for word in ("tempo", "speed up", "slow down", "accelerate")):
+        return ["tempo_handoff"] if tempo_handoff_safe else ["echo_fade"]
     if "echo" in direction:
         return ["echo_fade"]
     if "filter" in direction:
@@ -306,6 +320,8 @@ def _transition_candidates(
 
     if compatibility_score < 0.62 or tempo_delta >= 7.0:
         return ["echo_fade"]
+    if tempo_delta >= 2.5 and tempo_handoff_safe and compatibility_score >= 0.68:
+        return ["tempo_handoff", "echo_fade", "filter_blend"]
     if target.overall_energy > source.overall_energy * 1.22 and compatibility_score >= 0.68:
         return ["drop_swap", "echo_fade", "phrase_blend"]
     if dance_pair and tempo_delta <= 4.0 and energy_delta <= 0.32:
@@ -337,6 +353,7 @@ def _background_tail_seconds(technique: str, transition_duration: float) -> floa
         "phrase_blend": 0.68,
         "echo_fade": 0.52,
         "filter_blend": 0.6,
+        "tempo_handoff": 0.62,
         "bass_swap": 0.55,
         "loop_echo_out": 0.78,
         "drop_swap": 0.42,
@@ -350,6 +367,7 @@ def _bass_swap_position(technique: str) -> float:
         "phrase_blend": 0.58,
         "echo_fade": 0.52,
         "filter_blend": 0.57,
+        "tempo_handoff": 0.58,
         "bass_swap": 0.62,
         "loop_echo_out": 0.56,
         "drop_swap": 0.46,
@@ -364,6 +382,7 @@ def _technique_effects(effects: list[str], technique: str, enabled: bool) -> lis
         "phrase_blend": ["soft_sweep"],
         "echo_fade": ["echo_tail", "soft_sweep"],
         "filter_blend": ["filter_sweep"],
+        "tempo_handoff": ["soft_sweep"],
         "bass_swap": ["filter_sweep"],
         "loop_echo_out": ["loop_roll", "echo_tail"],
         "drop_swap": ["reverse_swell", "impact"],
@@ -373,6 +392,7 @@ def _technique_effects(effects: list[str], technique: str, enabled: bool) -> lis
         "phrase_blend": {"soft_sweep", "filter_sweep"},
         "echo_fade": {"echo_tail", "soft_sweep"},
         "filter_blend": {"filter_sweep", "soft_sweep"},
+        "tempo_handoff": {"soft_sweep", "echo_tail"},
         "bass_swap": {"filter_sweep", "soft_sweep"},
         "loop_echo_out": {"loop_roll", "echo_tail", "soft_sweep"},
         "drop_swap": {"reverse_swell", "reverb_riser", "impact"},
@@ -416,7 +436,7 @@ def _transition_duration_seconds(
     upper_bound = min(source.duration_seconds * 0.4, target.duration_seconds * 0.4, 6.0)
     if upper_bound <= 0:
         return 0.0
-    minimum = min(2.5, upper_bound)
+    minimum = min(2.5 if technique == "quick_cut" else 3.5, upper_bound)
     return round(max(min(requested, upper_bound), minimum), 3)
 
 
@@ -431,6 +451,7 @@ def _adaptive_transition_target(
         "phrase_blend": 5.5,
         "echo_fade": 3.75,
         "filter_blend": 4.75,
+        "tempo_handoff": 5.25,
         "bass_swap": 5.0,
         "loop_echo_out": 4.0,
         "drop_swap": 3.5,
@@ -453,7 +474,8 @@ def _adaptive_transition_target(
         duration -= 0.75
     elif any(word in direction for word in ("smooth", "chill", "lounge")) and compatibility_score >= 0.76:
         duration += 0.25
-    return float(max(2.5, min(6.0, duration)))
+    minimum = 2.5 if technique == "quick_cut" else 3.5
+    return float(max(minimum, min(6.0, duration)))
 
 
 def _per_track_limit(target_limit: float | None, max_play_seconds: float | None) -> float | None:
@@ -696,7 +718,16 @@ def _bpm_adjustment_percent(source_bpm: float | None, target_bpm: float | None) 
     if not source_bpm or not target_bpm:
         return 0.0
     ratio = source_bpm / target_bpm
-    if 0.92 <= ratio <= 1.08:
+    if 0.94 <= ratio <= 1.06:
+        return round((ratio - 1.0) * 100.0, 3)
+    return 0.0
+
+
+def _source_tempo_adjustment_percent(source_bpm: float | None, target_bpm: float | None) -> float:
+    if not source_bpm or not target_bpm:
+        return 0.0
+    ratio = target_bpm / source_bpm
+    if 0.94 <= ratio <= 1.06:
         return round((ratio - 1.0) * 100.0, 3)
     return 0.0
 

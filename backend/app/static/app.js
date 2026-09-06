@@ -1428,7 +1428,7 @@ function livePreTransitionWindow(track, transitionSeconds) {
 
 function livePlaybackDuration(track, preTransitionSeconds, transitionSeconds, playbackRate) {
   const available = Math.max(0, track.buffer.duration - liveTrackStartOffset(track));
-  const requested = Math.max(1, preTransitionSeconds + transitionSeconds + 0.2) * Math.max(0.1, playbackRate);
+  const requested = Math.max(1, preTransitionSeconds + transitionSeconds + 0.8) * Math.max(0.1, playbackRate);
   return Math.min(available, requested);
 }
 
@@ -1455,7 +1455,7 @@ function transitionToNextTrack(manual) {
   const plannedTransition = plannedTransitionBetween(currentTrack, nextTrack);
   const technique = plannedTransition?.technique || "phrase_blend";
   const transitionEffects = liveTransitionEffects(currentTrack, nextTrack);
-  const playbackRate = aiPlaybackRateForNext(nextTrack);
+  const playbackRate = aiPlaybackRateForNext(nextTrack, technique);
   const nextOffset = liveTrackStartOffset(nextTrack);
   const nextWindow = livePreTransitionWindow(
     nextTrack,
@@ -1481,6 +1481,15 @@ function transitionToNextTrack(manual) {
   if (liveSession.currentChannel) {
     scheduleBassHandoff(liveSession.currentChannel.eq.gain, now, transition, bassSwap, false);
   }
+  scheduleTempoHandoff(
+    liveSession.currentSource,
+    Number(liveSession.currentPlaybackRate || 1),
+    currentTrack,
+    nextTrack,
+    now,
+    transition,
+    technique,
+  );
   scheduleTechniqueFilters(liveSession.currentChannel, nextChannel, now, transition, technique);
   const loopBed = scheduleOutgoingLoopBed(currentTrack, now, transition, plannedTransition);
   if (liveSession.currentSource) {
@@ -1557,13 +1566,30 @@ function transitionSecondsBetween(sourceTrack, targetTrack) {
   return Math.max(2, Math.min(12, numericValue(els.transitionSeconds, liveSession.transitionSeconds)));
 }
 
-function aiPlaybackRateForNext(nextTrack) {
+function aiPlaybackRateForNext(nextTrack, technique = null) {
+  if (technique === "tempo_handoff") {
+    return 1;
+  }
   const current = liveSession?.decodedQueue?.[liveSession.currentIndex];
   if (!current?.bpm || !nextTrack?.bpm) {
     return 1;
   }
   const ratio = current.bpm / nextTrack.bpm;
   return ratio >= 0.94 && ratio <= 1.06 ? ratio : 1;
+}
+
+function scheduleTempoHandoff(source, currentRate, currentTrack, nextTrack, startTime, duration, technique) {
+  if (technique !== "tempo_handoff" || !source?.playbackRate || !currentTrack?.bpm || !nextTrack?.bpm) {
+    return;
+  }
+  const targetRate = nextTrack.bpm / currentTrack.bpm;
+  if (targetRate < 0.94 || targetRate > 1.06) {
+    return;
+  }
+  source.playbackRate.cancelScheduledValues(startTime);
+  source.playbackRate.setValueAtTime(Math.max(0.94, Math.min(1.06, currentRate)), startTime);
+  source.playbackRate.linearRampToValueAtTime(targetRate, startTime + duration * 0.72);
+  source.playbackRate.setValueAtTime(targetRate, startTime + duration);
 }
 
 function createLiveChannel(context, now, initialBassDb = 0) {
@@ -1604,13 +1630,16 @@ function scheduleEqualPowerFade(gainParam, startTime, duration, fadeIn, techniqu
       const eased = shifted * shifted * (3 - 2 * shifted);
       value = fadeIn ? eased : 1 - eased;
     } else if (fadeIn) {
-      value = Math.sin(progress * Math.PI * 0.5) ** 1.18;
+      const intro = Math.max(0, Math.min(1, progress / 0.3));
+      const introEase = intro * intro * (3 - 2 * intro);
+      const handoff = Math.max(0, Math.min(1, (progress - 0.3) / 0.7));
+      const handoffEase = handoff * handoff * (3 - 2 * handoff);
+      value = (0.1 * introEase) + (0.9 * handoffEase);
     } else {
-      const base = Math.max(0, Math.cos(progress * Math.PI * 0.5));
-      const power = ["phrase_blend", "echo_fade", "filter_blend", "loop_echo_out"].includes(technique)
-        ? 0.52
-        : 0.64;
-      value = base ** power;
+      const fadeStart = ["phrase_blend", "tempo_handoff", "loop_echo_out"].includes(technique) ? 0.2 : 0.16;
+      const shifted = Math.max(0, Math.min(1, (progress - fadeStart) / (0.95 - fadeStart)));
+      const eased = shifted * shifted * (3 - 2 * shifted);
+      value = 1 - eased;
     }
     curve[step] = Math.max(0.0001, Math.min(1, value));
   }
@@ -1634,7 +1663,14 @@ function scheduleBassHandoff(gainParam, startTime, duration, swapPosition, incom
 }
 
 function scheduleTechniqueFilters(outgoingChannel, incomingChannel, startTime, duration, technique) {
-  if (technique !== "filter_blend" || !outgoingChannel?.filter || !incomingChannel?.filter) {
+  if (!["filter_blend", "tempo_handoff"].includes(technique) || !outgoingChannel?.filter || !incomingChannel?.filter) {
+    return;
+  }
+  if (technique === "tempo_handoff") {
+    incomingChannel.filter.type = "highpass";
+    incomingChannel.filter.frequency.cancelScheduledValues(startTime);
+    incomingChannel.filter.frequency.setValueAtTime(700, startTime);
+    incomingChannel.filter.frequency.exponentialRampToValueAtTime(28, startTime + duration * 0.68);
     return;
   }
   outgoingChannel.filter.type = "lowpass";
@@ -2111,6 +2147,7 @@ function transitionTechniqueLabel(technique) {
     phrase_blend: "phrase blend",
     echo_fade: "echo fade",
     filter_blend: "filter blend",
+    tempo_handoff: "tempo handoff",
     bass_swap: "bass-swap blend",
     loop_echo_out: "loop-and-echo blend",
     drop_swap: "drop swap",
