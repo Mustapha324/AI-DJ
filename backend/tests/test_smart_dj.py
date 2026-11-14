@@ -208,3 +208,119 @@ def test_vibe_genre_hints_match_library_tags():
     assert genre_matches_direction("Hip-Hop / Rap", "more hip hop cuts")
     assert not genre_matches_direction("Rock", "smooth house")
     assert not genre_matches_direction("House", None)
+
+
+def _music(seconds: float, bpm: float = 124.0, freq: float = 220.0, sr: int = 22050):
+    import numpy as np
+
+    t = np.arange(int(seconds * sr)) / sr
+    phase = t % (60.0 / bpm)
+    kick = np.sin(2 * np.pi * 55 * phase) * np.exp(-phase * 20) * 0.5
+    return (kick + 0.2 * np.sin(2 * np.pi * freq * t)).astype(np.float32)
+
+
+@pytest.mark.parametrize(
+    "technique",
+    ["eq_blend", "kill_cut", "spinback", "power_down", "roll_build", "reverb_wash", "quick_cut", "bass_swap"],
+)
+def test_every_move_renders_cleanly(technique):
+    import numpy as np
+
+    from app.models.mix import MixTransition
+    from app.services.mix_renderer import _append_with_crossfade
+    from app.services.transition_selector import TECHNIQUES
+
+    sr = 22050
+    beat = 60.0 / 124.0
+    bars = TECHNIQUES[technique].fixed_bars or 4
+    duration = bars * 4 * beat
+    transition = MixTransition(
+        source_track_id="a",
+        target_track_id="b",
+        source_transition_start=10.0,
+        source_transition_end=10.0 + duration,
+        target_transition_start=0.0,
+        target_transition_end=duration,
+        timeline_start_time=10.0,
+        timeline_end_time=10.0 + duration,
+        duration_seconds=duration,
+        bpm_adjustment_percent=0.0,
+        gain_adjustment_db=0.0,
+        crossfade_curve="equal_power",
+        transition_type="crossfade",
+        technique=technique,
+        beat_seconds=beat,
+        incoming_entry_position=TECHNIQUES[technique].incoming_entry,
+        compatibility_score=0.8,
+        sfx=["impact"],
+    )
+    current = _music(20.0)
+    incoming = _music(20.0, freq=330.0)
+    fade = int(duration * sr)
+    mixed = _append_with_crossfade(current, incoming, fade, sr, transition)
+
+    assert len(mixed) == len(current) + len(incoming) - fade
+    assert np.isfinite(mixed).all()
+    assert float(np.max(np.abs(mixed))) <= 1.0
+    if TECHNIQUES[technique].incoming_entry >= 0.99:
+        overlap_end = len(current)
+        # Silence-ish right before the "1", then the new song at full level on it.
+        assert float(np.max(np.abs(mixed[overlap_end - 40 : overlap_end]))) < 0.25
+        assert float(np.max(np.abs(mixed[overlap_end : overlap_end + sr // 4]))) > 0.3
+
+
+def test_party_set_uses_varied_moves_without_repeats():
+    tracks = [
+        _track("h1", bpm=124, key=_key("A"), energy=0.08, genre="House"),
+        _track("h2", bpm=125, key=_key("E"), energy=0.1, genre="House"),
+        _track("r1", bpm=92, key=_key("C", "major"), energy=0.12, genre="Hip-Hop / Rap"),
+        _track("p1", bpm=118, key=_key("G", "major"), energy=0.2, genre="Pop"),
+        _track("r2", bpm=96, key=_key("F#"), energy=0.15, genre="Hip-Hop / Rap"),
+        _track("t1", bpm=128, key=_key("D"), energy=0.25, genre="Techno"),
+        _track("l1", bpm=100, key=_key("B", "major"), energy=0.18, genre="Latin"),
+    ]
+    from app.models.mix import MixPlanRequest
+
+    plan = MixPlanner().create_plan(
+        MixPlanRequest(track_ids=[t.track_id for t in tracks], mix_direction="open format party", use_trained_style=False),
+        tracks,
+        "mix",
+    )
+    techniques = [transition.technique for transition in plan.transitions]
+    assert all(a != b for a, b in zip(techniques, techniques[1:]))
+    assert len(set(techniques)) >= 4
+    gimmicks = [name for name in techniques if name in {"spinback", "power_down"}]
+    assert len(gimmicks) <= 2
+
+
+def test_smooth_vibe_avoids_hard_cuts():
+    tracks = [
+        _track(f"s{index}", bpm=122 + index * 0.5, key=_key(root), energy=0.08 + index * 0.01, genre="House")
+        for index, root in enumerate(["A", "E", "B", "F#", "C#"])
+    ]
+    from app.models.mix import MixPlanRequest
+
+    plan = MixPlanner().create_plan(
+        MixPlanRequest(track_ids=[t.track_id for t in tracks], mix_direction="smooth deep house", use_trained_style=False),
+        tracks,
+        "mix",
+    )
+    hard = {"kill_cut", "spinback", "power_down", "quick_cut", "roll_build"}
+    assert not hard & {transition.technique for transition in plan.transitions}
+
+
+@pytest.mark.parametrize(
+    ("direction", "expected"),
+    [("throw in a spinback", "spinback"), ("power down the record", "power_down"), ("reverb wash out", "reverb_wash"),
+     ("loop roll build up", "roll_build"), ("slam it on the one", "kill_cut")],
+)
+def test_new_moves_can_be_requested(direction, expected):
+    from app.models.mix import MixPlanRequest
+
+    tracks = [_track("a", bpm=124, key=_key("A")), _track("b", bpm=124, key=_key("E"))]
+    plan = MixPlanner().create_plan(
+        MixPlanRequest(track_ids=["a", "b"], auto_order=False, mix_direction=direction, use_trained_style=False),
+        tracks,
+        "mix",
+    )
+    assert plan.transitions[0].technique == expected

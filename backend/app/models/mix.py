@@ -11,6 +11,7 @@ from app.models.track import ApproximateBar, EnergyPoint, KeyEstimate
 TransitionType = Literal["crossfade"]
 CrossfadeCurve = Literal["equal_power", "linear"]
 TransitionTechnique = Literal[
+    "eq_blend",
     "phrase_blend",
     "echo_fade",
     "filter_blend",
@@ -19,6 +20,11 @@ TransitionTechnique = Literal[
     "loop_echo_out",
     "drop_swap",
     "quick_cut",
+    "kill_cut",
+    "roll_build",
+    "reverb_wash",
+    "spinback",
+    "power_down",
 ]
 MixStatus = Literal["planned", "queued", "rendering", "completed", "failed"]
 OutputFormat = Literal["wav"]
@@ -101,6 +107,13 @@ class MixTransition(BaseModel):
     outgoing_loop_seconds: float = Field(default=0.0, ge=0, le=16)
     background_tail_seconds: float = Field(default=0.0, ge=0, le=20)
     bass_swap_position: float = Field(default=0.5, ge=0.15, le=0.85)
+    beat_seconds: float = Field(default=0.5, gt=0, le=2.0, description="Length of one beat of the outgoing song.")
+    incoming_entry_position: float = Field(
+        default=0.0,
+        ge=0,
+        le=1,
+        description="Point (0..1) in the transition where the incoming song hits full level; 1 = slams in on the next downbeat.",
+    )
     compatibility_score: float = Field(..., ge=0, le=1)
     sfx: list[str] = Field(default_factory=list)
 

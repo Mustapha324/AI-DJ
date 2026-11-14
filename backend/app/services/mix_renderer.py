@@ -6,7 +6,7 @@ from pathlib import Path
 import librosa
 import numpy as np
 import soundfile as sf
-from scipy.signal import butter, sosfilt
+from scipy.signal import butter, fftconvolve, sosfilt
 
 from app.config import Settings
 from app.models.mix import MixPlan, MixTransition
@@ -152,16 +152,23 @@ def _append_with_crossfade(
     if transition:
         outgoing = _prepare_outgoing_transition(outgoing, sample_rate, transition)
     overlap = _dj_blend_overlap(outgoing, incoming[:fade], sample_rate, transition)
+    after = incoming[fade:].copy()
+    slams_in = bool(transition and transition.incoming_entry_position >= 0.99)
     if transition and transition.sfx:
         outgoing_only = {"echo_tail", "echo_freeze", "loop_roll", "brake_cut"}
         if transition.technique == "filter_blend":
             outgoing_only.add("filter_sweep")
+        if slams_in:
+            # The hit belongs on the new song's first downbeat, not before it.
+            outgoing_only.add("impact")
+            if "impact" in transition.sfx:
+                after = _add_impact_at_start(after, sample_rate)
         overlap = _add_transition_sfx(
             overlap,
             sample_rate,
             [name for name in transition.sfx if name not in outgoing_only],
         )
-    return np.concatenate([current[:-fade], overlap, incoming[fade:]])
+    return np.concatenate([current[:-fade], overlap, after])
 
 
 def _prepare_outgoing_transition(
@@ -174,6 +181,9 @@ def _prepare_outgoing_transition(
         prepared = _tempo_ramp_outgoing(prepared, transition.source_tempo_adjustment_percent)
     if transition.technique == "filter_blend":
         prepared = _filter_outgoing_transition(prepared, sample_rate)
+    special = _OUTGOING_MOVES.get(transition.technique)
+    if special:
+        prepared = special(prepared, sample_rate, transition.beat_seconds)
     if transition.outgoing_loop_seconds > 0 and transition.background_tail_seconds > 0:
         prepared = _layer_outgoing_loop(
             prepared,
@@ -254,6 +264,16 @@ def _dj_blend_overlap(
 
     technique = transition.technique if transition else "phrase_blend"
     progress = np.linspace(0.0, 1.0, fade, dtype=np.float32)
+    entry = transition.incoming_entry_position if transition else 0.0
+    if entry > 0.0:
+        # Outgoing move already shaped its own exit; the next song comes in on the "1".
+        # A few milliseconds of ramp right before the downbeat avoids a click.
+        ramp = min(0.05, 0.006 / max(fade / sample_rate, 1e-3))
+        fade_in = _smoothstep(progress, max(0.0, entry - ramp), entry)
+        mixed = outgoing[:fade] + incoming[:fade] * fade_in
+        return _prevent_clipping(mixed.astype(np.float32))
+    if technique == "eq_blend":
+        return _three_band_blend(outgoing[:fade], incoming[:fade], sample_rate, progress)
     if technique == "quick_cut":
         shifted = np.clip((progress - 0.08) / 0.84, 0.0, 1.0)
         eased = shifted * shifted * (3.0 - (2.0 * shifted))
@@ -280,6 +300,153 @@ def _dj_blend_overlap(
 
     overlap = (out_high * mids_out) + (in_high * mids_in) + (out_low * outgoing_bass) + (in_low * incoming_bass)
     return _micro_duck(_prevent_clipping(overlap.astype(np.float32)))
+
+
+def _three_band_blend(
+    outgoing: np.ndarray,
+    incoming: np.ndarray,
+    sample_rate: int,
+    progress: np.ndarray,
+) -> np.ndarray:
+    """Long EQ blend the way a club DJ rides it on a three-band mixer.
+
+    Incoming highs come in first, then mids; the bass lines swap quickly in the
+    middle on a phrase line (never both basses at once); the outgoing mids and
+    highs leave last.
+    """
+    out_low, out_mid, out_high = _split_three_bands(outgoing, sample_rate)
+    in_low, in_mid, in_high = _split_three_bands(incoming, sample_rate)
+    in_high_gain = _smoothstep(progress, 0.0, 0.25)
+    in_mid_gain = _smoothstep(progress, 0.15, 0.48)
+    bass_swap = _smoothstep(progress, 0.48, 0.53)
+    out_mid_gain = 1.0 - _smoothstep(progress, 0.5, 0.82)
+    out_high_gain = 1.0 - _smoothstep(progress, 0.62, 0.97)
+    mixed = (
+        out_low * (1.0 - bass_swap)
+        + in_low * bass_swap
+        + out_mid * out_mid_gain
+        + in_mid * in_mid_gain
+        + out_high * out_high_gain
+        + in_high * in_high_gain
+    )
+    return _micro_duck(_prevent_clipping(mixed.astype(np.float32)))
+
+
+def _split_three_bands(audio: np.ndarray, sample_rate: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    low, rest = _split_low_high(audio, sample_rate)
+    if rest.size < 32:
+        return low, rest * 0.5, rest * 0.5
+    cutoff = min(2500.0, (sample_rate / 2.0) - 200.0)
+    sos = butter(2, cutoff, btype="lowpass", fs=sample_rate, output="sos")
+    mid = sosfilt(sos, rest).astype(np.float32)
+    return low, mid, (rest - mid).astype(np.float32)
+
+
+def _kill_cut_outgoing(audio: np.ndarray, sample_rate: int, beat_seconds: float) -> np.ndarray:
+    """Pull the bass out across the last bar so the room feels the gap, then hard stop on the 1."""
+    if audio.size < 64:
+        return audio
+    low, high = _split_low_high(audio, sample_rate)
+    progress = np.linspace(0.0, 1.0, len(audio), dtype=np.float32)
+    bass = 1.0 - _smoothstep(progress, 0.0, 0.25)
+    out = low * bass + high * (1.0 + 0.12 * progress)
+    return (out * _tail_fade(len(audio), sample_rate, 0.012)).astype(np.float32)
+
+
+def _spinback_outgoing(audio: np.ndarray, sample_rate: int, beat_seconds: float) -> np.ndarray:
+    """Play to the last beat of the bar, then throw the record backwards."""
+    if audio.size < sample_rate * 0.2:
+        return audio
+    spin_samples = min(len(audio) // 2, max(int(sample_rate * 0.25), int(beat_seconds * sample_rate)))
+    spin_start = len(audio) - spin_samples
+    # Backwards from the spin point: the record moves fast, then slows to a stop.
+    progress = np.linspace(0.0, 1.0, spin_samples, dtype=np.float64)
+    speed = 3.2 * (1.0 - progress) ** 1.6 + 0.05
+    positions = spin_start - np.cumsum(speed)
+    spun = np.interp(positions, np.arange(len(audio), dtype=np.float64), audio.astype(np.float64), left=0.0)
+    envelope = (1.0 - progress) ** 0.8
+    result = audio.copy()
+    result[spin_start:] = (spun * envelope).astype(np.float32)
+    return result.astype(np.float32)
+
+
+def _power_down_outgoing(audio: np.ndarray, sample_rate: int, beat_seconds: float) -> np.ndarray:
+    """Turntable stop: the outgoing song slows to a halt over the last beat and a half."""
+    if audio.size < sample_rate * 0.2:
+        return audio
+    stop_samples = min(len(audio) * 2 // 3, max(int(sample_rate * 0.35), int(beat_seconds * 1.5 * sample_rate)))
+    stop_start = len(audio) - stop_samples
+    progress = np.linspace(0.0, 1.0, stop_samples, dtype=np.float64)
+    rate = (1.0 - progress) ** 1.4
+    positions = stop_start + np.cumsum(rate)
+    slowed = np.interp(positions, np.arange(len(audio), dtype=np.float64), audio.astype(np.float64), right=0.0)
+    result = audio.copy()
+    result[stop_start:] = (slowed * (1.0 - progress**3)).astype(np.float32)
+    return result.astype(np.float32)
+
+
+def _roll_build_outgoing(audio: np.ndarray, sample_rate: int, beat_seconds: float) -> np.ndarray:
+    """Loop roll that halves every quarter (1 beat, 1/2, 1/4, 1/8) while the bass filters out."""
+    beat = max(32, int(beat_seconds * sample_rate))
+    if audio.size < beat * 2:
+        return audio
+    quarters = np.array_split(np.arange(len(audio)), 4)
+    rolled = np.zeros(len(audio), dtype=np.float32)
+    snippet_source = audio[: beat].copy()
+    for index, part in enumerate(quarters):
+        loop = max(32, beat // (2**index))
+        edge = max(4, min(loop // 6, int(sample_rate * 0.004)))
+        rolled[part] = _repeat_with_crossfade(snippet_source[:loop], len(part), edge)
+    low, high = _split_low_high(rolled, sample_rate)
+    progress = np.linspace(0.0, 1.0, len(audio), dtype=np.float32)
+    build = (low * (1.0 - _smoothstep(progress, 0.2, 0.9))) + high * (0.85 + 0.3 * progress)
+    return (build * _tail_fade(len(audio), sample_rate, 0.008)).astype(np.float32)
+
+
+def _reverb_wash_outgoing(audio: np.ndarray, sample_rate: int, beat_seconds: float) -> np.ndarray:
+    """Send the outgoing song into a big reverb and let the dry signal go, leaving a wash."""
+    if audio.size < 256:
+        return audio
+    _, high = _split_low_high(audio, sample_rate)
+    impulse_length = int(sample_rate * 1.6)
+    rng = np.random.default_rng(1234)
+    t = np.arange(impulse_length, dtype=np.float32) / sample_rate
+    impulse = rng.normal(0.0, 1.0, impulse_length).astype(np.float32) * np.exp(-3.2 * t)
+    impulse /= max(float(np.sqrt(np.sum(impulse**2))), 1e-9)
+    send_progress = np.linspace(0.0, 1.0, len(audio), dtype=np.float32)
+    send = high * _smoothstep(send_progress, 0.0, 0.35)
+    wet = fftconvolve(send, impulse)[: len(audio)].astype(np.float32)
+    dry_gain = 1.0 - _smoothstep(send_progress, 0.1, 0.5)
+    wet_gain = 0.9 * _smoothstep(send_progress, 0.05, 0.4) * (1.0 - _smoothstep(send_progress, 0.55, 1.0) * 0.85)
+    return ((audio * dry_gain) + (wet * wet_gain)).astype(np.float32)
+
+
+def _tail_fade(length: int, sample_rate: int, seconds: float) -> np.ndarray:
+    envelope = np.ones(length, dtype=np.float32)
+    count = min(length, max(1, int(sample_rate * seconds)))
+    envelope[-count:] = np.linspace(1.0, 0.0, count, dtype=np.float32)
+    return envelope
+
+
+def _add_impact_at_start(audio: np.ndarray, sample_rate: int) -> np.ndarray:
+    length = min(len(audio), int(sample_rate * 0.65))
+    if length <= 0:
+        return audio
+    t = np.arange(length, dtype=np.float32) / sample_rate
+    decay = np.exp(-6.0 * t).astype(np.float32)
+    hit = np.sin(2.0 * np.pi * 58.0 * t).astype(np.float32) * decay * 0.1
+    result = audio.copy()
+    result[:length] += hit
+    return result
+
+
+_OUTGOING_MOVES = {
+    "kill_cut": _kill_cut_outgoing,
+    "spinback": _spinback_outgoing,
+    "power_down": _power_down_outgoing,
+    "roll_build": _roll_build_outgoing,
+    "reverb_wash": _reverb_wash_outgoing,
+}
 
 
 def _smoothstep(values: np.ndarray, edge_start: float, edge_end: float) -> np.ndarray:

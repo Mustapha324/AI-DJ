@@ -9,6 +9,7 @@ from app.models.style_profile import DJStyleProfile
 from app.models.track import TrackAnalysis
 from app.services.compatibility import CompatibilityService, effective_tempo_ratio, key_score
 from app.services.song_research_service import recommend_play_window
+from app.services.transition_selector import TECHNIQUES, TransitionHistory, choose_technique
 from app.services.vibe import energy_arc_target, energy_flow_fit
 
 # Arc weight vs. pair cost when ordering a set. Pair cost (1 - compatibility)
@@ -85,20 +86,22 @@ class MixPlanner:
         ]
 
         pair_decisions = []
-        technique_counts: dict[str, int] = {}
-        previous_technique: str | None = None
+        history = TransitionHistory()
         for pair_index, (source_track, target_track) in enumerate(zip(tracks, tracks[1:], strict=False)):
             compatibility = self.compatibility_service.compare(
                 analysis_by_id[source_track.track_id],
                 analysis_by_id[target_track.track_id],
             )
-            technique = select_transition_technique(
+            technique = choose_technique(
                 source_track,
                 target_track,
                 compatibility.compatibility_score,
                 request.mix_direction,
-                previous_technique,
-                technique_counts,
+                history,
+                set_position=(pair_index + 1) / len(tracks),
+                long_blend_ok=_long_blend_pair_ok(
+                    source_track, target_track, compatibility.compatibility_score, request.mix_direction
+                ),
             )
             duration = _transition_duration_seconds(
                 source_track,
@@ -110,8 +113,7 @@ class MixPlanner:
                 request.mix_direction,
             )
             pair_decisions.append((compatibility, technique, duration))
-            technique_counts[technique] = technique_counts.get(technique, 0) + 1
-            previous_technique = technique
+            history.add(technique)
 
         for index, track in enumerate(tracks):
             source_start = source_starts[index]
@@ -205,6 +207,8 @@ class MixPlanner:
                         outgoing_loop_seconds=_loop_seconds(loop_beats, track.bpm),
                         background_tail_seconds=_background_tail_seconds(technique, transition_duration),
                         bass_swap_position=_bass_swap_position(technique),
+                        incoming_entry_position=TECHNIQUES[technique].incoming_entry,
+                        beat_seconds=round(60.0 / (track.bpm or 120.0), 4),
                         compatibility_score=compatibility.compatibility_score,
                         sfx=effects,
                     )
@@ -363,74 +367,15 @@ def select_transition_technique(
     target: MixableTrack,
     compatibility_score: float,
     mix_direction: str | None,
-    previous_technique: str | None,
-    technique_counts: dict[str, int],
 ) -> str:
-    candidates = _transition_candidates(source, target, compatibility_score, mix_direction)
-    return min(
-        candidates,
-        key=lambda candidate: (
-            candidate == previous_technique and len(candidates) > 1,
-            technique_counts.get(candidate, 0),
-            candidates.index(candidate),
-        ),
+    """Best single move for one pair (no set history), e.g. for recommendations."""
+    return choose_technique(
+        source,
+        target,
+        compatibility_score,
+        mix_direction,
+        long_blend_ok=_long_blend_pair_ok(source, target, compatibility_score, mix_direction),
     )
-
-
-def _transition_candidates(
-    source: MixableTrack,
-    target: MixableTrack,
-    compatibility_score: float,
-    mix_direction: str | None,
-) -> list[str]:
-    direction = (mix_direction or "").lower()
-    tempo_ratio = effective_tempo_ratio(source.bpm, target.bpm)
-    tempo_delta = abs(tempo_ratio - 1.0) * (source.bpm or 120.0) if source.bpm and target.bpm else 0.0
-    energy_delta = _energy_delta(source, target)
-    source_genre = source.genre.lower()
-    target_genre = target.genre.lower()
-    dance_words = ("house", "techno", "trance", "dance", "electronic", "drum & bass", "dubstep")
-    vocal_words = ("pop", "r&b", "soul", "hip-hop", "rap", "rock", "country", "open format")
-    dance_pair = any(word in source_genre for word in dance_words) and any(
-        word in target_genre for word in dance_words
-    )
-    vocal_pair = any(word in source_genre for word in vocal_words) or any(
-        word in target_genre for word in vocal_words
-    )
-    tempo_handoff_safe = SAFE_TEMPO_RATIO[0] <= tempo_ratio <= SAFE_TEMPO_RATIO[1]
-
-    if any(word in direction for word in ("quick", "hard cut", "scratch")):
-        return ["quick_cut"]
-    if any(word in direction for word in ("repeat", "loop")):
-        return ["loop_echo_out"]
-    if any(word in direction for word in ("tempo", "speed up", "slow down", "accelerate")):
-        return ["tempo_handoff"] if tempo_handoff_safe else ["echo_fade"]
-    if "echo" in direction:
-        return ["echo_fade"]
-    if "filter" in direction:
-        return ["filter_blend"]
-    if "bass swap" in direction:
-        return ["bass_swap"]
-    if "drop" in direction:
-        return ["drop_swap"]
-    if "fade" in direction:
-        return ["phrase_blend"]
-
-    if compatibility_score < 0.62 or tempo_delta >= 7.0:
-        return ["echo_fade"]
-    if tempo_delta >= 2.5 and tempo_handoff_safe and compatibility_score >= 0.68:
-        return ["tempo_handoff", "echo_fade", "filter_blend"]
-    if target.overall_energy > source.overall_energy * 1.22 and compatibility_score >= 0.68:
-        return ["drop_swap", "echo_fade", "phrase_blend"]
-    if dance_pair and tempo_delta <= 4.0 and energy_delta <= 0.32:
-        return ["bass_swap", "phrase_blend", "filter_blend", "loop_echo_out"]
-    if vocal_pair:
-        return ["echo_fade", "phrase_blend", "filter_blend"]
-    if compatibility_score >= 0.82:
-        return ["phrase_blend", "filter_blend", "loop_echo_out", "echo_fade"]
-    if compatibility_score >= 0.68:
-        return ["loop_echo_out", "echo_fade", "filter_blend"]
-    return ["echo_fade"]
 
 
 def _outgoing_loop_beats(technique: str, transition_duration: float, bpm: float | None) -> int:
@@ -448,6 +393,12 @@ def _loop_seconds(loop_beats: int, bpm: float | None) -> float:
 
 def _background_tail_seconds(technique: str, transition_duration: float) -> float:
     ratios = {
+        "eq_blend": 0.7,
+        "reverb_wash": 0.5,
+        "roll_build": 0.0,
+        "kill_cut": 0.0,
+        "spinback": 0.0,
+        "power_down": 0.0,
         "phrase_blend": 0.68,
         "echo_fade": 0.52,
         "filter_blend": 0.6,
@@ -462,6 +413,12 @@ def _background_tail_seconds(technique: str, transition_duration: float) -> floa
 
 def _bass_swap_position(technique: str) -> float:
     return {
+        "eq_blend": 0.5,
+        "reverb_wash": 0.5,
+        "roll_build": 0.85,
+        "kill_cut": 0.85,
+        "spinback": 0.85,
+        "power_down": 0.85,
         "phrase_blend": 0.58,
         "echo_fade": 0.52,
         "filter_blend": 0.57,
@@ -477,6 +434,12 @@ def _technique_effects(effects: list[str], technique: str, enabled: bool) -> lis
     if not enabled:
         return []
     additions = {
+        "eq_blend": [],
+        "reverb_wash": [],
+        "roll_build": ["reverb_riser"],
+        "kill_cut": [],
+        "spinback": [],
+        "power_down": [],
         "phrase_blend": ["soft_sweep"],
         "echo_fade": ["echo_tail", "soft_sweep"],
         "filter_blend": ["filter_sweep"],
@@ -487,6 +450,12 @@ def _technique_effects(effects: list[str], technique: str, enabled: bool) -> lis
         "quick_cut": ["echo_freeze", "brake_cut"],
     }.get(technique, [])
     allowed = {
+        "eq_blend": {"soft_sweep"},
+        "reverb_wash": {"soft_sweep"},
+        "roll_build": {"reverb_riser", "filter_sweep", "impact"},
+        "kill_cut": {"impact"},
+        "spinback": {"impact"},
+        "power_down": {"impact"},
         "phrase_blend": {"soft_sweep", "filter_sweep"},
         "echo_fade": {"echo_tail", "soft_sweep"},
         "filter_blend": {"filter_sweep", "soft_sweep"},
@@ -511,6 +480,17 @@ def _transition_duration_seconds(
     bpm = source.bpm or target.bpm or 120.0
     beat_seconds = 60.0 / bpm
     bar_seconds = 4.0 * beat_seconds
+    upper_limit = min(source.duration_seconds * 0.4, target.duration_seconds * 0.4)
+    if upper_limit <= 0:
+        return 0.0
+
+    fixed_bars = TECHNIQUES[technique].fixed_bars if technique in TECHNIQUES else None
+    if fixed_bars:
+        # Moves that live on the last bar(s) of a phrase: exact bar length so the
+        # next song lands on the "1". Two-bar moves drop to one bar at slow tempos.
+        bars = fixed_bars if fixed_bars * bar_seconds <= 6.0 else max(1.0, fixed_bars / 2)
+        return round(min(bars * bar_seconds, upper_limit), 3)
+
     phrase_request = (
         style_profile.transition_duration_seconds
         if style_profile
@@ -528,15 +508,13 @@ def _transition_duration_seconds(
 
     cap = SHORT_BLEND_CAP_SECONDS
     if _long_blend_ok(source, target, compatibility_score, technique, mix_direction):
-        # Locked tempo and key: let the songs ride together like a real DJ blend
-        # (8 bars when it fits, otherwise 4) instead of a short crossfade.
+        # Locked tempo and key: let the songs ride together like a real DJ blend.
+        # A full EQ blend takes 8 bars when it fits; other blends take 4.
         cap = LONG_BLEND_CAP_SECONDS
-        long_target = 8 * bar_seconds if 8 * bar_seconds <= cap else 4 * bar_seconds
-        requested = max(requested, long_target)
+        bars = 8 if technique == "eq_blend" and 8 * bar_seconds <= cap else 4
+        requested = max(requested, min(cap, bars * bar_seconds))
 
-    upper_bound = min(source.duration_seconds * 0.4, target.duration_seconds * 0.4, cap)
-    if upper_bound <= 0:
-        return 0.0
+    upper_bound = min(upper_limit, cap)
     minimum = min(2.5 if technique == "quick_cut" else 3.5, upper_bound)
     duration = max(min(requested, upper_bound), minimum)
     return round(_snap_to_grid(duration, bar_seconds, beat_seconds, minimum, upper_bound), 3)
@@ -549,7 +527,19 @@ def _long_blend_ok(
     technique: str,
     mix_direction: str | None,
 ) -> bool:
-    if technique not in {"phrase_blend", "bass_swap", "filter_blend"} or compatibility_score < 0.82:
+    if technique not in {"eq_blend", "phrase_blend", "bass_swap", "filter_blend"}:
+        return False
+    return _long_blend_pair_ok(source, target, compatibility_score, mix_direction)
+
+
+def _long_blend_pair_ok(
+    source: MixableTrack,
+    target: MixableTrack,
+    compatibility_score: float,
+    mix_direction: str | None,
+) -> bool:
+    """Tempo and key are locked tightly enough for the two songs to ride together."""
+    if compatibility_score < 0.82:
         return False
     if not source.bpm or not target.bpm:
         return False
@@ -585,6 +575,7 @@ def _adaptive_transition_target(
     mix_direction: str | None,
 ) -> float:
     technique_target = {
+        "eq_blend": 6.0,
         "phrase_blend": 5.5,
         "echo_fade": 3.75,
         "filter_blend": 4.75,

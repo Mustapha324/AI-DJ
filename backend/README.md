@@ -28,7 +28,8 @@ The original single-track analysis endpoint is still supported.
 - Bar-length blends: short 2-3 bar blends for risky pairs, up to 8-bar (max 16 s) blends when tempo and key are locked
 - Excerpt-based mixing so long songs or full DJ sets do not have to play end to end
 - Real WAV rendering with phrase-aware cue points, bass-swap crossfades, gain normalization, fade-in/fade-out, and clipping prevention
-- Match-aware rotation across clean fades, safe tempo handoffs, echo fades, filter blends, bass swaps, drop swaps, quick cuts, and beat-synced repeat/echo outros
+- Party-DJ transition picker with 14 moves: long 3-band EQ blends, bass swaps, phrase blends, filter blends, tempo handoffs, echo-outs, reverb washes, loop-and-echo outros, halving loop-roll builds, drop swaps, quick cuts, bass-out cuts on the 1, spinbacks, and power-downs
+- Each pair gets the move a working DJ would choose: blends when tempo and key lock, echo/reverb exits or cuts on the downbeat when they don't, builds into energy lifts, washes and power-downs into drops. It also reads where in the set the transition falls and the vibe ("open format party" leans on cuts, "smooth deep house" stays on blends), never repeats a move back to back, and keeps spinbacks/power-downs rare so they still land
 - Procedural transition SFX such as sweeps and downbeat impacts
 - Mix audio streaming through `GET /api/mixes/{mix_id}/audio`
 
@@ -191,6 +192,22 @@ The batch endpoint continues after individual file failures. Broken files should
 5. Click **Execute**.
 
 The response is ordered from best match to weakest match and includes a score breakdown for tempo, key, energy, and structure.
+
+## Transition Moves
+
+| Move | When the AI uses it | How it sounds |
+| --- | --- | --- |
+| `eq_blend` | Tempo and key locked | 8-bar ride: incoming highs, then mids, quick bass swap mid-blend, outgoing highs leave last |
+| `bass_swap` / `phrase_blend` / `filter_blend` | Beatmatchable pairs | Shorter blends; the filter hides small key clashes |
+| `tempo_handoff` | Dance tracks a few BPM apart | Outgoing song ramps to the new tempo during the blend |
+| `echo_fade` / `reverb_wash` | Tempo or genre change, energy drop, end of the night | Outgoing song echoes or washes out; reverb wash drops the new song on bar 2 |
+| `loop_echo_out` | Dance pairs | Outgoing loop rides under the new song |
+| `roll_build` | Energy lift, peak time, party vibe | 1 beat, 1/2, 1/4, 1/8 loop roll with rising filter, new song slams on the 1 |
+| `drop_swap` | Big energy lift | Straight into the next drop |
+| `quick_cut` / `kill_cut` | Open format, hip-hop, tempo jumps | One-bar cut; `kill_cut` pulls the bass first, then the new song hits on the 1 |
+| `spinback` / `power_down` | Genre or tempo change (power-down for energy drops) | Vinyl backspin or turntable stop on the last beat, then the new song on the 1 |
+
+Name a move in the vibe box to force it (for example `spinback`, `power down`, `reverb wash`, `loop roll`, `slam on the one`, `eq blend`).
 
 ## Swagger: Recommend The Next Song
 

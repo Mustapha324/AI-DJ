@@ -39,6 +39,10 @@ let autoPickPending = false;
 // up to 16 s; manual blend input is capped the same way.
 const MAX_BLEND_SECONDS = 16;
 const SAFE_TEMPO_RATIO = [0.94, 1.06];
+// Moves where the outgoing song does its own exit and the next song lands on the "1".
+const SLAM_MOVES = new Set(["kill_cut", "spinback", "power_down", "roll_build", "reverb_wash"]);
+// Moves whose length is fixed in bars by the planner (never stretched by the blend-seconds box).
+const BAR_LOCKED_MOVES = new Set([...SLAM_MOVES, "quick_cut"]);
 
 const els = {
   dropZone: document.getElementById("dropZone"),
@@ -1759,42 +1763,51 @@ function transitionToNextTrack(manual) {
     liveSession.decodedQueue[nextIndex + 1] ? transitionSecondsBetween(nextTrack, liveSession.decodedQueue[nextIndex + 1]) : transition,
   );
   const nextSource = context.createBufferSource();
-  const nextChannel = createLiveChannel(context, now, -12);
+  const slamMove = SLAM_MOVES.has(technique);
+  const nextChannel = createLiveChannel(context, now, slamMove || technique === "eq_blend" ? 0 : -12);
 
   nextSource.buffer = nextTrack.buffer;
   nextSource.playbackRate.setValueAtTime(playbackRate, now);
   nextSource.connect(nextChannel.eq);
   nextChannel.gain.gain.setValueAtTime(0.0001, now);
-  scheduleEqualPowerFade(nextChannel.gain.gain, now, transition, true, technique);
-  const bassSwap = Math.max(0.25, Math.min(0.82, plannedTransition?.bass_swap_position || 0.58));
-  scheduleBassHandoff(nextChannel.eq.gain, now, transition, bassSwap, true);
   nextSource.start(now, nextOffset, livePlaybackDuration(nextTrack));
   const glide = scheduleTempoGlideHome(nextSource, nextTrack, playbackRate, now + transition);
   liveSession.activeSources.add(nextSource);
 
   holdPlaybackRate(liveSession.currentSource, now, outgoingRate);
-  if (liveSession.currentGain) {
-    liveSession.currentGain.gain.cancelScheduledValues(now);
-    scheduleEqualPowerFade(liveSession.currentGain.gain, now, transition, false, technique);
+  const outgoing = {
+    track: currentTrack,
+    source: liveSession.currentSource,
+    channel: liveSession.currentChannel,
+    rate: outgoingRate,
+  };
+  // One beat of the outgoing song in real (wall-clock) seconds.
+  const beatSeconds = (plannedTransition?.beat_seconds || 60 / (currentTrack.bpm || 120)) / Math.max(0.5, outgoingRate);
+  let stopAt;
+  if (slamMove) {
+    const entry = plannedTransition?.incoming_entry_position ?? (technique === "reverb_wash" ? 0.5 : 1);
+    scheduleSlamIn(nextChannel.gain.gain, now, now + transition * entry);
+    stopAt = scheduleOutgoingMove(technique, outgoing, now, transition, beatSeconds);
+  } else if (technique === "eq_blend") {
+    scheduleEqBlend(outgoing.channel, nextChannel, now, transition);
+    stopAt = now + transition + 0.08;
+  } else {
+    scheduleEqualPowerFade(nextChannel.gain.gain, now, transition, true, technique);
+    const bassSwap = Math.max(0.25, Math.min(0.82, plannedTransition?.bass_swap_position || 0.58));
+    scheduleBassHandoff(nextChannel.eq.gain, now, transition, bassSwap, true);
+    if (outgoing.channel) {
+      outgoing.channel.gain.gain.cancelScheduledValues(now);
+      scheduleEqualPowerFade(outgoing.channel.gain.gain, now, transition, false, technique);
+      scheduleBassHandoff(outgoing.channel.eq.gain, now, transition, bassSwap, false);
+    }
+    scheduleTempoHandoff(outgoing.source, outgoingRate, currentTrack, nextTrack, now, transition, technique);
+    scheduleTechniqueFilters(outgoing.channel, nextChannel, now, transition, technique);
+    const loopBed = scheduleOutgoingLoopBed(currentTrack, now, transition, plannedTransition);
+    stopAt = now + transition + (loopBed ? 0.18 : 0.08);
   }
-  if (liveSession.currentChannel) {
-    scheduleBassHandoff(liveSession.currentChannel.eq.gain, now, transition, bassSwap, false);
-  }
-  scheduleTempoHandoff(
-    liveSession.currentSource,
-    outgoingRate,
-    currentTrack,
-    nextTrack,
-    now,
-    transition,
-    technique,
-  );
-  scheduleTechniqueFilters(liveSession.currentChannel, nextChannel, now, transition, technique);
-  const loopBed = scheduleOutgoingLoopBed(currentTrack, now, transition, plannedTransition);
-  if (liveSession.currentSource) {
-    const oldSource = liveSession.currentSource;
+  if (outgoing.source) {
     try {
-      oldSource.stop(now + transition + (loopBed ? 0.18 : 0.08));
+      outgoing.source.stop(stopAt);
     } catch {
       // Source may already have reached its scheduled ending.
     }
@@ -1887,11 +1900,10 @@ function plannedTransitionBetween(sourceTrack, targetTrack) {
 }
 
 function transitionSecondsBetween(sourceTrack, targetTrack) {
-  if (!blendSecondsTouched) {
-    const planned = plannedTransitionBetween(sourceTrack, targetTrack);
-    if (planned?.duration_seconds) {
-      return Math.max(2, Math.min(MAX_BLEND_SECONDS, planned.duration_seconds));
-    }
+  const planned = plannedTransitionBetween(sourceTrack, targetTrack);
+  if (planned?.duration_seconds && (!blendSecondsTouched || BAR_LOCKED_MOVES.has(planned.technique))) {
+    // Bar-locked moves keep their exact planned length so the next song lands on the "1".
+    return Math.max(0.5, Math.min(MAX_BLEND_SECONDS, planned.duration_seconds));
   }
   return Math.max(2, Math.min(MAX_BLEND_SECONDS, numericValue(els.transitionSeconds, liveSession.transitionSeconds)));
 }
@@ -1948,6 +1960,7 @@ function scheduleTempoHandoff(source, currentRate, currentTrack, nextTrack, star
 
 function createLiveChannel(context, now, initialBassDb = 0) {
   const eq = context.createBiquadFilter();
+  const treble = context.createBiquadFilter();
   const filter = context.createBiquadFilter();
   const gain = context.createGain();
   const delay = context.createDelay(1.2);
@@ -1956,20 +1969,210 @@ function createLiveChannel(context, now, initialBassDb = 0) {
   eq.type = "lowshelf";
   eq.frequency.setValueAtTime(180, now);
   eq.gain.setValueAtTime(initialBassDb, now);
+  treble.type = "highshelf";
+  treble.frequency.setValueAtTime(3000, now);
+  treble.gain.setValueAtTime(0, now);
   filter.type = "lowpass";
   filter.frequency.setValueAtTime(20000, now);
   filter.Q.setValueAtTime(0.5, now);
   delay.delayTime.setValueAtTime(0.18, now);
   feedback.gain.setValueAtTime(0.0001, now);
   delayWet.gain.setValueAtTime(0.0001, now);
-  eq.connect(filter);
+  eq.connect(treble);
+  treble.connect(filter);
   filter.connect(gain);
   gain.connect(liveSession?.master || context.destination);
   gain.connect(delay);
   delay.connect(feedback);
   feedback.connect(delay);
   delay.connect(delayWet).connect(liveSession?.master || context.destination);
-  return { eq, filter, gain, delay, feedback, delayWet };
+  return { eq, treble, filter, gain, delay, feedback, delayWet };
+}
+
+// ---- Party moves -----------------------------------------------------------
+
+// Smoothstep from one value to another between two fractions of a window.
+function scheduleSmoothRamp(param, start, duration, from, to, startFraction = 0, endFraction = 1) {
+  const steps = 48;
+  const curve = new Float32Array(steps);
+  for (let step = 0; step < steps; step += 1) {
+    const x = step / (steps - 1);
+    curve[step] = from + (to - from) * x * x * (3 - 2 * x);
+  }
+  const rampStart = start + duration * startFraction;
+  param.setValueAtTime(from, rampStart);
+  param.setValueCurveAtTime(curve, rampStart, Math.max(0.01, duration * (endFraction - startFraction)));
+}
+
+// The next song stays silent, then hits full level exactly on its downbeat.
+function scheduleSlamIn(gainParam, start, entryTime) {
+  const rampStart = Math.max(start, entryTime - 0.006);
+  gainParam.setValueAtTime(0.0001, rampStart);
+  gainParam.linearRampToValueAtTime(1, Math.max(rampStart + 0.002, entryTime));
+}
+
+// Long club blend on a three-band mixer: incoming highs, then mids, a quick bass
+// swap in the middle (never two basslines at once), outgoing highs leave last.
+function scheduleEqBlend(outChannel, inChannel, start, duration) {
+  scheduleSmoothRamp(inChannel.gain.gain, start, duration, 0.0001, 1, 0, 0.42);
+  scheduleSmoothRamp(inChannel.eq.gain, start, duration, -26, 0, 0.48, 0.53);
+  if (!outChannel) {
+    return;
+  }
+  outChannel.gain.gain.cancelScheduledValues(start);
+  outChannel.eq.gain.cancelScheduledValues(start);
+  outChannel.treble.gain.cancelScheduledValues(start);
+  scheduleSmoothRamp(outChannel.eq.gain, start, duration, 0, -26, 0.48, 0.53);
+  scheduleSmoothRamp(outChannel.treble.gain, start, duration, 0, -15, 0.62, 0.95);
+  scheduleSmoothRamp(outChannel.gain.gain, start, duration, 1, 0.0001, 0.55, 0.98);
+}
+
+// Outgoing exit for slam moves. Returns when the outgoing source can stop.
+function scheduleOutgoingMove(technique, out, start, duration, beatSeconds) {
+  const end = start + duration;
+  const gain = out.channel?.gain?.gain;
+  if (!gain || !out.source) {
+    return end;
+  }
+  gain.cancelScheduledValues(start);
+  gain.setValueAtTime(1, start);
+
+  if (technique === "kill_cut") {
+    // Pull the bass out over the bar so the room feels the gap, stop dead on the 1.
+    out.channel.eq.gain.cancelScheduledValues(start);
+    scheduleSmoothRamp(out.channel.eq.gain, start, duration, 0, -30, 0, 0.25);
+    gain.setValueAtTime(1, end - 0.012);
+    gain.linearRampToValueAtTime(0.0001, end);
+    return end + 0.02;
+  }
+  if (technique === "power_down") {
+    // Turntable stop over the last beat and a half.
+    const stopStart = Math.max(start, end - beatSeconds * 1.5);
+    out.source.playbackRate.setValueAtTime(out.rate, stopStart);
+    out.source.playbackRate.exponentialRampToValueAtTime(0.03, end);
+    gain.setValueAtTime(1, stopStart);
+    gain.linearRampToValueAtTime(0.0001, end);
+    return end + 0.02;
+  }
+  if (technique === "spinback") {
+    const spinStart = Math.max(start, end - beatSeconds);
+    scheduleBackspin(out, spinStart, end);
+    gain.setValueAtTime(1, spinStart);
+    gain.linearRampToValueAtTime(0.0001, spinStart + 0.015);
+    return spinStart + 0.03;
+  }
+  if (technique === "roll_build") {
+    scheduleLoopRoll(out, start, duration, beatSeconds);
+    gain.linearRampToValueAtTime(0.0001, start + 0.01);
+    return start + 0.03;
+  }
+  if (technique === "reverb_wash") {
+    scheduleReverbWash(out.channel, start, duration);
+    scheduleSmoothRamp(gain, start, duration, 1, 0.0001, 0.1, 0.5);
+    return end + 0.05;
+  }
+  return end;
+}
+
+// Throw the record backwards: play the last moment of audio reversed, fast then slowing.
+function scheduleBackspin(out, spinStart, end) {
+  const { context } = liveSession;
+  const source = out.track.buffer;
+  const playhead = Math.min(source.duration, bufferPositionAt(spinStart));
+  const seconds = Math.min(playhead, 1.6);
+  const frames = Math.floor(seconds * source.sampleRate);
+  if (frames < 64) {
+    return;
+  }
+  const reversed = context.createBuffer(source.numberOfChannels, frames, source.sampleRate);
+  const startFrame = Math.floor((playhead - seconds) * source.sampleRate);
+  for (let channel = 0; channel < source.numberOfChannels; channel += 1) {
+    const input = source.getChannelData(channel).subarray(startFrame, startFrame + frames);
+    const output = reversed.getChannelData(channel);
+    for (let index = 0; index < frames; index += 1) {
+      output[index] = input[frames - 1 - index];
+    }
+  }
+  const spin = context.createBufferSource();
+  const spinGain = context.createGain();
+  spin.buffer = reversed;
+  spin.playbackRate.setValueAtTime(3.2, spinStart);
+  spin.playbackRate.exponentialRampToValueAtTime(0.15, end);
+  spinGain.gain.setValueAtTime(0.9, spinStart);
+  spinGain.gain.linearRampToValueAtTime(0.0001, end);
+  spin.connect(spinGain).connect(liveSession.master);
+  spin.start(spinStart);
+  spin.stop(end + 0.05);
+  trackLiveSource(spin);
+}
+
+// Loop roll that halves every quarter (1 beat, 1/2, 1/4, 1/8) as the bass filters out.
+function scheduleLoopRoll(out, start, duration, beatSeconds) {
+  const { context } = liveSession;
+  const playhead = bufferPositionAt(start);
+  const beatInBuffer = beatSeconds * out.rate;
+  const channel = createLiveChannel(context, start, 0);
+  channel.filter.type = "highpass";
+  channel.filter.frequency.setValueAtTime(30, start);
+  channel.filter.frequency.exponentialRampToValueAtTime(550, start + duration * 0.92);
+  channel.gain.gain.setValueAtTime(1, start);
+  channel.gain.gain.linearRampToValueAtTime(1.35, start + duration - 0.012);
+  channel.gain.gain.linearRampToValueAtTime(0.0001, start + duration);
+  const quarter = duration / 4;
+  for (let step = 0; step < 4; step += 1) {
+    const roll = context.createBufferSource();
+    roll.buffer = out.track.buffer;
+    roll.loop = true;
+    roll.loopStart = playhead;
+    roll.loopEnd = Math.min(out.track.buffer.duration, playhead + beatInBuffer / 2 ** step);
+    roll.playbackRate.setValueAtTime(out.rate, start);
+    roll.connect(channel.eq);
+    roll.start(start + step * quarter, playhead);
+    roll.stop(start + (step + 1) * quarter + 0.004);
+    trackLiveSource(roll);
+  }
+}
+
+// Send the outgoing song into a big reverb, let the dry signal go, keep the wash.
+function scheduleReverbWash(channel, start, duration) {
+  const { context } = liveSession;
+  if (!liveSession.reverb) {
+    const seconds = 2.2;
+    const impulse = context.createBuffer(2, Math.floor(seconds * context.sampleRate), context.sampleRate);
+    for (let c = 0; c < 2; c += 1) {
+      const data = impulse.getChannelData(c);
+      for (let index = 0; index < data.length; index += 1) {
+        data[index] = (Math.random() * 2 - 1) * Math.exp((-3.2 * index) / context.sampleRate);
+      }
+    }
+    liveSession.reverb = context.createConvolver();
+    liveSession.reverb.buffer = impulse;
+    liveSession.reverbReturn = context.createGain();
+    liveSession.reverbReturn.gain.setValueAtTime(0.3, context.currentTime);
+    liveSession.reverb.connect(liveSession.reverbReturn).connect(liveSession.master);
+  }
+  const highpass = context.createBiquadFilter();
+  const send = context.createGain();
+  highpass.type = "highpass";
+  highpass.frequency.setValueAtTime(250, start);
+  send.gain.setValueAtTime(0.0001, start);
+  send.gain.linearRampToValueAtTime(1, start + duration * 0.35);
+  send.gain.linearRampToValueAtTime(0.0001, start + duration * 0.5);
+  channel.filter.connect(highpass).connect(send).connect(liveSession.reverb);
+  const disconnectAfter = (start - context.currentTime + duration + 3) * 1000;
+  window.setTimeout(() => {
+    try {
+      highpass.disconnect();
+      send.disconnect();
+    } catch {
+      // Already torn down with the session.
+    }
+  }, Math.max(0, disconnectAfter));
+}
+
+function trackLiveSource(source) {
+  liveSession.activeSources.add(source);
+  source.addEventListener("ended", () => liveSession?.activeSources?.delete(source));
 }
 
 function scheduleEqualPowerFade(gainParam, startTime, duration, fadeIn, technique = "phrase_blend") {
@@ -2040,7 +2243,8 @@ function scheduleTechniqueFilters(outgoingChannel, incomingChannel, startTime, d
 
 function liveTransitionEffects(sourceTrack, targetTrack) {
   const planned = plannedTransitionBetween(sourceTrack, targetTrack);
-  return planned?.sfx?.length ? planned.sfx : ["filter_sweep", "echo_tail", "reverse_swell", "impact"];
+  // An empty list is deliberate (clean moves); only fall back when there is no plan at all.
+  return planned ? planned.sfx || [] : ["filter_sweep", "echo_tail"];
 }
 
 function scheduleBrowserChannelEffects(channel, transitionStart, transitionSeconds, effects) {
@@ -2503,6 +2707,12 @@ function transitionTechniqueLabel(technique) {
     loop_echo_out: "loop-and-echo blend",
     drop_swap: "drop swap",
     quick_cut: "quick cut",
+    eq_blend: "EQ blend",
+    kill_cut: "bass-out cut",
+    roll_build: "loop roll build",
+    reverb_wash: "reverb wash",
+    spinback: "spinback",
+    power_down: "power-down",
   }[technique] || "transition";
 }
 

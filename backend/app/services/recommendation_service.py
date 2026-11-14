@@ -82,8 +82,6 @@ class RecommendationService:
             target_mix,
             compatibility.compatibility_score,
             request.mix_direction,
-            None,
-            {},
         )
         relation = key_relation(current.key, candidate.key)
         energy_change = (candidate.overall_rms_energy - current.overall_rms_energy) / max(

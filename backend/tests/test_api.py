@@ -38,7 +38,9 @@ def test_live_deck_effects_cannot_break_the_transition(client):
     assert 'tempo_handoff: "tempo handoff"' in response.text
     assert "value = (0.1 * introEase) + (0.9 * handoffEase);" in response.text
     assert "gainParam.setValueCurveAtTime(curve" in response.text
-    assert "oldSource.stop(now + transition" in response.text
+    assert "outgoing.source.stop(stopAt)" in response.text
+    for move in ("scheduleBackspin(", "scheduleLoopRoll(", "scheduleReverbWash(", "scheduleEqBlend(", "scheduleSlamIn("):
+        assert f"function {move}" in response.text
     assert "Math.min(0.45, transition * 0.18)" not in response.text
     assert "transition_bars: 4" in response.text
 
