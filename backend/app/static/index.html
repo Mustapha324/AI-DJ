@@ -85,6 +85,37 @@
           <ul id="catalogResults" class="catalog-results"></ul>
         </section>
 
+        <section class="setup-section" aria-labelledby="online-title">
+          <div class="section-head">
+            <h2 id="online-title">Online music</h2>
+            <button id="onlineTrendingButton" type="button" class="ghost small-button">Trending</button>
+          </div>
+          <div class="search-row with-source">
+            <select id="onlineSource" aria-label="Online music source">
+              <option value="audius">Audius</option>
+            </select>
+            <input id="onlineSearch" type="search" maxlength="120" placeholder="Search full songs online" />
+            <button id="onlineSearchButton" type="button" class="icon-command" aria-label="Search online music">Search</button>
+          </div>
+          <p id="onlineNote" class="catalog-meta">Full songs stream straight into the mixer. Artists are credited on each track.</p>
+          <ul id="onlineResults" class="catalog-results"></ul>
+        </section>
+
+        <section class="setup-section" aria-labelledby="spotify-title">
+          <div class="section-head">
+            <h2 id="spotify-title">Spotify playlists</h2>
+            <span id="spotifyStatus" class="pill">Not connected</span>
+          </div>
+          <p class="catalog-meta">Spotify picks the songs; the AI finds mixable copies online (Spotify audio itself can't be mixed).</p>
+          <div class="file-actions">
+            <a id="spotifyConnect" class="button-link" href="/api/spotify/login">Connect Spotify</a>
+            <select id="spotifyPlaylists" aria-label="Spotify playlist" disabled>
+              <option value="">Choose a playlist</option>
+            </select>
+          </div>
+          <ul id="spotifyMatches" class="catalog-results"></ul>
+        </section>
+
         <section class="setup-section" aria-labelledby="direction-title">
           <h2 id="direction-title">2. Set the vibe</h2>
           <textarea
@@ -113,6 +144,11 @@
             <label class="switch-option" title="When the queue runs out, the AI picks the best next song from your library">
               <span>Auto DJ</span>
               <input id="autoDj" type="checkbox" checked />
+              <i aria-hidden="true"></i>
+            </label>
+            <label class="switch-option" title="If your library runs out, Auto DJ streams a fitting song from online music">
+              <span>Auto DJ online</span>
+              <input id="autoDjOnline" type="checkbox" checked />
               <i aria-hidden="true"></i>
             </label>
           </div>

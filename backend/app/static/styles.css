@@ -47,6 +47,7 @@ select {
 
 button,
 .download-link,
+.button-link,
 .mode-link {
   min-height: 40px;
   border: 1px solid var(--line-strong);
@@ -70,6 +71,7 @@ button,
 
 button:hover,
 .download-link:hover,
+.button-link:hover,
 .mode-link:hover {
   border-color: var(--accent);
   background: #222a29;
@@ -402,6 +404,25 @@ textarea::placeholder {
 .genre-badge {
   color: var(--accent);
   border-color: rgba(101, 234, 209, 0.28) !important;
+}
+
+.search-row.with-source {
+  grid-template-columns: 6.5rem minmax(0, 1fr) auto;
+}
+
+.search-row.with-source select {
+  width: 100%;
+  min-width: 0;
+}
+
+.button-link[aria-disabled="true"] {
+  opacity: 0.5;
+  pointer-events: none;
+}
+
+.source-link {
+  color: var(--accent);
+  font-size: 0.75rem;
 }
 
 .search-row input {

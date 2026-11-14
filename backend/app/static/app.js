@@ -83,6 +83,17 @@ const els = {
   useSfx: document.getElementById("useSfx"),
   useTrainedStyle: document.getElementById("useTrainedStyle"),
   autoDj: document.getElementById("autoDj"),
+  autoDjOnline: document.getElementById("autoDjOnline"),
+  onlineSource: document.getElementById("onlineSource"),
+  onlineSearch: document.getElementById("onlineSearch"),
+  onlineSearchButton: document.getElementById("onlineSearchButton"),
+  onlineTrendingButton: document.getElementById("onlineTrendingButton"),
+  onlineNote: document.getElementById("onlineNote"),
+  onlineResults: document.getElementById("onlineResults"),
+  spotifyConnect: document.getElementById("spotifyConnect"),
+  spotifyStatus: document.getElementById("spotifyStatus"),
+  spotifyPlaylists: document.getElementById("spotifyPlaylists"),
+  spotifyMatches: document.getElementById("spotifyMatches"),
   recommendList: document.getElementById("recommendList"),
   recommendAnchor: document.getElementById("recommendAnchor"),
   targetMinutes: document.getElementById("targetMinutes"),
@@ -163,6 +174,15 @@ els.transitionSeconds.addEventListener("input", () => {
   blendSecondsTouched = true;
 });
 els.mixDirection.addEventListener("input", scheduleRecommendations);
+els.onlineSearchButton.addEventListener("click", () => searchOnline("search"));
+els.onlineTrendingButton.addEventListener("click", () => searchOnline("trending"));
+els.onlineSearch.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") {
+    event.preventDefault();
+    searchOnline("search");
+  }
+});
+els.spotifyPlaylists.addEventListener("change", () => matchSpotifyPlaylist(els.spotifyPlaylists.value));
 els.autoDj.addEventListener("change", () => {
   updateDeckDisplay();
   if (els.autoDj.checked) {
@@ -1186,6 +1206,253 @@ function selectedTrackSummaries() {
   return Array.from(combined.values());
 }
 
+// ---- Online music (Audius / Jamendo) ---------------------------------------
+
+async function loadOnlineSources() {
+  try {
+    const sources = await fetchJson("/api/sources");
+    els.onlineSource.innerHTML = sources
+      .map(
+        (source) =>
+          `<option value="${escapeHtml(source.name)}" ${source.available ? "" : "disabled"}>${escapeHtml(
+            sourceLabel(source.name),
+          )}${source.available ? "" : " (needs key)"}</option>`,
+      )
+      .join("");
+    const missing = sources.filter((source) => !source.available);
+    if (missing.length) {
+      els.onlineNote.textContent = `Full songs stream straight into the mixer. ${missing.map((source) => source.note).join(" ")}`;
+    }
+  } catch {
+    // Keep the default Audius option.
+  }
+}
+
+function sourceLabel(name) {
+  return { audius: "Audius", jamendo: "Jamendo" }[name] || name;
+}
+
+async function searchOnline(mode) {
+  const source = els.onlineSource.value || "audius";
+  const query = els.onlineSearch.value.trim();
+  if (mode === "search" && !query) {
+    els.onlineSearch.focus();
+    return;
+  }
+  const genre = els.genreFilter.value || currentGenre() || "";
+  const url =
+    mode === "trending"
+      ? `/api/sources/trending?source=${encodeURIComponent(source)}&limit=20${genre ? `&genre=${encodeURIComponent(genre)}` : ""}`
+      : `/api/sources/search?source=${encodeURIComponent(source)}&limit=20&query=${encodeURIComponent(query)}`;
+  setStatus(mode === "trending" ? `Finding trending ${genre || "songs"} on ${sourceLabel(source)}` : `Searching ${sourceLabel(source)}`, 14);
+  try {
+    const results = await fetchJson(url);
+    renderOnlineResults(results);
+    setStatus(results.length ? `${results.length} online songs ready to mix` : "No online matches", results.length ? 20 : 0);
+  } catch (error) {
+    renderOnlineResults([]);
+    showErrors([{ file_name: "Online music", error: error.message || "Online search failed." }]);
+  }
+}
+
+function currentGenre() {
+  const current = liveSession?.decodedQueue?.[liveSession.currentIndex];
+  return (current && analyzedTracks.get(current.trackId)?.genre) || null;
+}
+
+function renderOnlineResults(results) {
+  els.onlineResults.innerHTML = "";
+  if (!results.length) {
+    els.onlineResults.appendChild(emptyItem("No online songs found. Try another search or Trending."));
+    return;
+  }
+  for (const track of results) {
+    const item = document.createElement("li");
+    item.className = "catalog-item";
+    item.innerHTML = `
+      <div>
+        <strong>${escapeHtml(track.title)}</strong>
+        <div class="catalog-meta">${escapeHtml(track.artist)} - ${escapeHtml(track.genre)} - ${formatDuration(track.duration_seconds)}
+          ${track.page_url ? `- <a class="source-link" href="${escapeHtml(track.page_url)}" target="_blank" rel="noopener">${escapeHtml(sourceLabel(track.source))}</a>` : ""}
+        </div>
+      </div>
+      <div class="catalog-actions">
+        <button type="button" class="small-button" data-action="next">Play Next</button>
+        <button type="button" class="small-button" data-action="add">${track.in_library_track_id ? "Add (saved)" : "Add"}</button>
+      </div>
+    `;
+    item.querySelector('[data-action="add"]').addEventListener("click", (event) => importOnlineTrack(track, false, event.currentTarget));
+    item.querySelector('[data-action="next"]').addEventListener("click", (event) => importOnlineTrack(track, true, event.currentTarget));
+    els.onlineResults.appendChild(item);
+  }
+}
+
+// Stream the song into the library (the server analyzes BPM/key/cues), then queue it.
+async function importOnlineTrack(track, playNext, button = null) {
+  if (button) {
+    button.disabled = true;
+    button.textContent = "Loading...";
+  }
+  setStatus(`Streaming ${track.title} from ${sourceLabel(track.source)} - analyzing BPM and key`, 30);
+  try {
+    const analysis = await fetchJson("/api/sources/import", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ source: track.source, source_id: track.source_id }),
+    });
+    addAnalyzedTrackToQueue(analysis, playNext, `${sourceLabel(track.source)} song added`);
+    if (button) {
+      button.textContent = "Added";
+    }
+    return analysis;
+  } catch (error) {
+    showErrors([{ file_name: track.title, error: error.message || "Could not stream this song." }]);
+    setStatus("Online import failed", 0);
+    if (button) {
+      button.disabled = false;
+      button.textContent = "Retry";
+    }
+    return null;
+  }
+}
+
+function addAnalyzedTrackToQueue(analysis, playNext, reason) {
+  selectedLibraryTracks.set(analysis.track_id, analysis);
+  analyzedTracks.set(analysis.track_id, analysis);
+  updateGenreOptions([analysis]);
+  const queueId = `track:${analysis.track_id}`;
+  const added = ensureQueueItem(queueItemForTrack(analysis));
+  renderTracks();
+  if (playNext) {
+    cueQueueItemNext(queueId);
+  } else {
+    renderQueue();
+    if (added && liveSession?.playing) {
+      scheduleLiveLineupUpdate(reason).catch(() => {});
+    }
+  }
+  setStatus(added ? `${reason} - ready to mix` : "Already in the queue", 40);
+}
+
+// ---- Spotify playlists (song picker only) ---------------------------------
+// Spotify's terms forbid mixing its audio, so playlists are matched to mixable
+// copies in the library or on Audius, and those copies are what the DJ plays.
+
+let spotifyMatchesCache = [];
+
+async function loadSpotifyStatus() {
+  const params = new URLSearchParams(window.location.search);
+  if (params.get("spotify_error")) {
+    showErrors([{ file_name: "Spotify", error: params.get("spotify_error") }]);
+  }
+  if (params.has("spotify") || params.has("spotify_error")) {
+    window.history.replaceState({}, "", window.location.pathname);
+  }
+  try {
+    const status = await fetchJson("/api/spotify/status");
+    els.spotifyConnect.title = status.configured ? "" : `${status.note} Redirect URI: ${status.redirect_uri}`;
+    if (!status.configured) {
+      els.spotifyStatus.textContent = "Needs Client ID";
+      els.spotifyConnect.setAttribute("aria-disabled", "true");
+      els.spotifyMatches.innerHTML = "";
+      els.spotifyMatches.appendChild(emptyItem(`${status.note} Redirect URI: ${status.redirect_uri}`));
+      return;
+    }
+    els.spotifyConnect.removeAttribute("aria-disabled");
+    if (!status.connected) {
+      els.spotifyStatus.textContent = "Not connected";
+      return;
+    }
+    els.spotifyStatus.textContent = "Connected";
+    els.spotifyConnect.textContent = "Reconnect";
+    const playlists = await fetchJson("/api/spotify/playlists");
+    els.spotifyPlaylists.innerHTML =
+      `<option value="">Choose a playlist (${playlists.length})</option>` +
+      playlists
+        .map((playlist) => `<option value="${escapeHtml(playlist.id)}">${escapeHtml(playlist.name)} (${playlist.song_count})</option>`)
+        .join("");
+    els.spotifyPlaylists.disabled = !playlists.length;
+  } catch (error) {
+    els.spotifyStatus.textContent = "Spotify error";
+    showErrors([{ file_name: "Spotify", error: error.message || "Could not load Spotify." }]);
+  }
+}
+
+async function matchSpotifyPlaylist(playlistId) {
+  if (!playlistId) {
+    return;
+  }
+  els.spotifyMatches.innerHTML = "";
+  els.spotifyMatches.appendChild(emptyItem("Finding mixable copies of each song..."));
+  setStatus("Matching your Spotify playlist to mixable songs", 18);
+  try {
+    spotifyMatchesCache = await fetchJson(`/api/spotify/playlists/${encodeURIComponent(playlistId)}/matches`);
+    renderSpotifyMatches(spotifyMatchesCache);
+    const found = spotifyMatchesCache.filter((match) => match.library_track_id || match.online).length;
+    setStatus(`${found} of ${spotifyMatchesCache.length} playlist songs are mixable`, 24);
+  } catch (error) {
+    els.spotifyMatches.innerHTML = "";
+    showErrors([{ file_name: "Spotify", error: error.message || "Could not read this playlist." }]);
+  }
+}
+
+function renderSpotifyMatches(matches) {
+  els.spotifyMatches.innerHTML = "";
+  const playable = matches.filter((match) => match.library_track_id || match.online);
+  if (playable.length) {
+    const header = document.createElement("li");
+    header.className = "catalog-item";
+    header.innerHTML = `<div><strong>${playable.length} of ${matches.length} songs can be mixed</strong>
+      <div class="catalog-meta">Missing songs aren't on Audius or in your library yet.</div></div>
+      <div class="catalog-actions"><button type="button" class="small-button">Add all</button></div>`;
+    header.querySelector("button").addEventListener("click", (event) => addSpotifyMatches(playable, event.currentTarget));
+    els.spotifyMatches.appendChild(header);
+  }
+  for (const match of matches) {
+    const item = document.createElement("li");
+    item.className = "catalog-item";
+    const where = match.library_track_id
+      ? "In your library"
+      : match.online
+        ? `${sourceLabel(match.online.source)}: ${escapeHtml(match.online.artist)} - ${escapeHtml(match.online.title)}`
+        : "No mixable copy found";
+    item.innerHTML = `
+      <div>
+        <strong>${escapeHtml(match.song.artist)} - ${escapeHtml(match.song.title)}</strong>
+        <div class="catalog-meta">${where}</div>
+      </div>
+      <div class="catalog-actions">
+        <button type="button" class="small-button" ${match.library_track_id || match.online ? "" : "disabled"}>Add</button>
+      </div>`;
+    item.querySelector("button").addEventListener("click", (event) => addSpotifyMatches([match], event.currentTarget));
+    els.spotifyMatches.appendChild(item);
+  }
+}
+
+async function addSpotifyMatches(matches, button = null) {
+  if (button) {
+    button.disabled = true;
+  }
+  let added = 0;
+  for (const match of matches) {
+    if (match.library_track_id) {
+      const track = await fullAnalysis(match.library_track_id).catch(() => null);
+      if (track) {
+        addAnalyzedTrackToQueue(track, false, "Spotify pick added");
+        added += 1;
+      }
+    } else if (match.online) {
+      if (await importOnlineTrack(match.online, false)) {
+        added += 1;
+      }
+    }
+  }
+  if (button) {
+    button.textContent = "Added";
+  }
+  setStatus(`${added} Spotify playlist song${added === 1 ? "" : "s"} added - ready to mix`, 40);
+}
+
 // ---- Recommended next songs & Auto DJ -------------------------------------
 
 function recommendationAnchor() {
@@ -1305,6 +1572,45 @@ function queueItemForTrack(track) {
   };
 }
 
+// Library ran dry: stream a trending song in the same genre from online music.
+async function autoPickOnline(session, current) {
+  const genre = analyzedTracks.get(current.trackId)?.genre || "";
+  setStatus(`Auto DJ looking online for ${genre || "a fitting song"} - music keeps playing`, 46);
+  try {
+    const params = new URLSearchParams({ source: "audius", limit: "15" });
+    if (genre && genre !== "Open Format") {
+      params.set("genre", genre);
+    }
+    const options = await fetchJson(`/api/sources/trending?${params}`);
+    const fresh = options.filter(
+      (track) => !track.in_library_track_id || !liveQueue.some((item) => item.trackId === track.in_library_track_id),
+    );
+    // Try a couple in case one fails to stream.
+    for (const track of fresh.slice(0, 3)) {
+      if (liveSession !== session || !session.playing) {
+        return false;
+      }
+      const analysis = await fetchJson("/api/sources/import", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ source: track.source, source_id: track.source_id }),
+      }).catch(() => null);
+      if (analysis && !liveQueue.some((item) => item.trackId === analysis.track_id)) {
+        selectedLibraryTracks.set(analysis.track_id, analysis);
+        analyzedTracks.set(analysis.track_id, analysis);
+        ensureQueueItem(queueItemForTrack(analysis));
+        renderTracks();
+        renderQueue();
+        await scheduleLiveLineupUpdate(`Auto DJ streamed ${analysis.title} from Audius`);
+        return true;
+      }
+    }
+  } catch (error) {
+    console.warn("Auto DJ could not reach online music.", error);
+  }
+  return false;
+}
+
 // Auto DJ: once the playing song is the last one queued, add the best match
 // from the library so the set keeps going without a gap.
 async function maybeAutoPick() {
@@ -1323,6 +1629,11 @@ async function maybeAutoPick() {
   try {
     const picks = await fetchRecommendations(current.trackId, 3);
     const pick = picks.find((candidate) => !liveQueue.some((item) => item.trackId === candidate.track_id));
+    if (!pick && liveSession === session && session.playing && els.autoDjOnline.checked) {
+      if (await autoPickOnline(session, current)) {
+        return;
+      }
+    }
     if (!pick || liveSession !== session || !session.playing) {
       if (!pick && liveSession === session) {
         setStatus("Auto DJ has no new songs left - add more to keep going", 46);
@@ -2958,6 +3269,8 @@ renderFiles();
 renderTracks();
 renderQueue();
 loadInitialLibrary();
+loadOnlineSources();
+loadSpotifyStatus();
 renderReferenceMixes();
 updateTimingMode();
 loadStyleStatus();

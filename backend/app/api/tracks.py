@@ -1,3 +1,5 @@
+from collections.abc import Callable
+
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 from fastapi.responses import FileResponse
 
@@ -111,14 +113,28 @@ async def import_track_from_url(
     track_analyzer: TrackAnalyzer = Depends(get_track_analyzer),
     research_service: SongResearchService = Depends(get_song_research_service),
 ) -> TrackAnalysis:
+    return await import_remote_track(
+        request.url,
+        request.file_name,
+        track_service,
+        track_analyzer,
+        research_service,
+    )
+
+
+async def import_remote_track(
+    url: str,
+    file_name: str | None,
+    track_service: TrackService,
+    track_analyzer: TrackAnalyzer,
+    research_service: SongResearchService,
+    apply_metadata: Callable[[TrackAnalysis], None] | None = None,
+) -> TrackAnalysis:
+    """Download an authorized audio link, analyze it, save it, and build its DJ research."""
     saved_upload = None
     try:
         track_id = track_service.generate_track_id()
-        saved_upload = await track_service.save_remote_audio_for_analysis(
-            request.url,
-            track_id,
-            file_name=request.file_name,
-        )
+        saved_upload = await track_service.save_remote_audio_for_analysis(url, track_id, file_name=file_name)
         duplicate = track_service.find_duplicate_by_hash(saved_upload.content_hash)
         if duplicate:
             saved_upload.path.unlink(missing_ok=True)
@@ -131,6 +147,8 @@ async def import_track_from_url(
             original_file_name=saved_upload.safe_file_name,
         )
         classify_track_genre(analysis, saved_upload.path)
+        if apply_metadata:
+            apply_metadata(analysis)
         analysis.content_hash = saved_upload.content_hash
         analysis.file_size_bytes = saved_upload.size_bytes
         duplicate = track_service.find_duplicate_by_analysis(analysis)

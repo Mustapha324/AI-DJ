@@ -190,9 +190,19 @@ class TrackService:
                 beat_count=analysis.beats.beat_count,
                 approximate_bar_count=len(analysis.beats.approximate_bars),
                 overall_rms_energy=analysis.overall_rms_energy,
+                source=analysis.source,
+                source_id=analysis.source_id,
+                source_url=analysis.source_url,
+                artist=analysis.artist,
             )
             for analysis in self.list_analyses()
         ]
+
+    def find_by_source(self, source: str, source_id: str) -> TrackAnalysis | None:
+        for analysis in self.list_analyses():
+            if analysis.source == source and analysis.source_id == source_id:
+                return analysis
+        return None
 
     def search_tracks(self, query: str | None = None, genre: str | None = None) -> list[TrackSummary]:
         tracks = self.list_tracks()
@@ -209,6 +219,7 @@ class TrackService:
             searchable = " ".join(
                 [
                     track.title,
+                    track.artist or "",
                     track.file_name,
                     track.genre,
                     track.key.root,

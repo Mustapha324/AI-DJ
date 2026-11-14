@@ -19,6 +19,9 @@ def test_party_mode_page_loads(client):
     assert 'id="transitionSeconds" type="number" min="2" max="16" step="1" value="6"' in response.text
     assert 'id="autoDj"' in response.text
     assert 'id="recommendList"' in response.text
+    assert 'id="onlineSearch"' in response.text
+    assert 'id="spotifyConnect"' in response.text
+    assert 'id="autoDjOnline"' in response.text
     assert "/docs" in response.text
 
 

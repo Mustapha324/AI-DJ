@@ -19,7 +19,7 @@ SectionType = Literal[
     "low_energy",
 ]
 
-GenreSource = Literal["embedded", "filename", "audio_profile", "fallback", "manual", "unknown"]
+GenreSource = Literal["embedded", "filename", "audio_profile", "fallback", "manual", "online", "unknown"]
 
 
 class EnergyPoint(BaseModel):
@@ -85,6 +85,12 @@ class TrackAnalysis(BaseModel):
     possible_low_energy_sections: list[TrackSection] = Field(default_factory=list)
     content_hash: str | None = None
     file_size_bytes: int | None = Field(default=None, ge=0)
+    # Attribution for songs imported from an online source (Audius, Jamendo, ...).
+    source: str | None = None
+    source_id: str | None = None
+    source_url: str | None = None
+    artist: str | None = None
+    license: str | None = None
 
 
 class TrackSummary(BaseModel):
@@ -100,6 +106,10 @@ class TrackSummary(BaseModel):
     beat_count: int = 0
     approximate_bar_count: int = 0
     overall_rms_energy: float = 0.0
+    source: str | None = None
+    source_id: str | None = None
+    source_url: str | None = None
+    artist: str | None = None
 
 
 class TrackImportUrlRequest(BaseModel):
@@ -150,3 +160,60 @@ class TrackCompatibility(BaseModel):
     target_file_name: str
     compatibility_score: float = Field(..., ge=0, le=1)
     score_breakdown: CompatibilityBreakdown
+
+
+MusicSource = Literal["audius", "jamendo"]
+
+
+class OnlineTrack(BaseModel):
+    source: MusicSource
+    source_id: str
+    title: str
+    artist: str
+    genre: str = "Open Format"
+    duration_seconds: float = Field(..., ge=0)
+    artwork_url: str | None = None
+    page_url: str | None = None
+    license: str | None = None
+    stream_url: str
+    in_library_track_id: str | None = None
+
+
+class OnlineImportRequest(BaseModel):
+    source: MusicSource
+    source_id: str = Field(..., min_length=1, max_length=64)
+
+
+class MusicSourceInfo(BaseModel):
+    name: str
+    available: bool
+    note: str
+
+
+class SpotifyStatus(BaseModel):
+    configured: bool
+    connected: bool
+    redirect_uri: str
+    note: str
+
+
+class SpotifyPlaylist(BaseModel):
+    id: str
+    name: str
+    song_count: int = 0
+    image_url: str | None = None
+
+
+class SpotifySong(BaseModel):
+    title: str
+    artist: str
+    duration_seconds: float = 0.0
+
+
+class SpotifyMatch(BaseModel):
+    """A Spotify song and the mixable copy found for it (library or online), if any."""
+
+    song: SpotifySong
+    library_track_id: str | None = None
+    online: OnlineTrack | None = None
+    confidence: float = Field(default=0.0, ge=0, le=1)

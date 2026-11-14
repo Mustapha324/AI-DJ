@@ -28,7 +28,11 @@ The original single-track analysis endpoint is still supported.
 - Bar-length blends: short 2-3 bar blends for risky pairs, up to 8-bar (max 16 s) blends when tempo and key are locked
 - Excerpt-based mixing so long songs or full DJ sets do not have to play end to end
 - Real WAV rendering with phrase-aware cue points, bass-swap crossfades, gain normalization, fade-in/fade-out, and clipping prevention
-- Party-DJ transition picker with 14 moves: long 3-band EQ blends, bass swaps, phrase blends, filter blends, tempo handoffs, echo-outs, reverb washes, loop-and-echo outros, halving loop-roll builds, drop swaps, quick cuts, bass-out cuts on the 1, spinbacks, and power-downs
+- Online music: search and stream full songs from Audius (free, no key) or Jamendo (free key) straight into the library and live deck, with artist credit and license kept on each track
+- Spotify playlists as a song picker: connect Spotify, choose a playlist, and the app finds mixable copies of each song in your library or on Audius (Spotify audio itself is never played or mixed - Spotify's terms forbid it)
+- Auto DJ online: when your library runs out mid-set, Auto DJ streams a trending song in the same genre from Audius
+- Deep transitions performed from automation lanes (shared by the live deck and the WAV render): 16-bar double plays with a one-beat bass swap, vocal-over-beat mashups, resonant filter swaps, "repeat, speed up, switch" loop risers, semitone key-change lifts, and beat juggles
+- Party-DJ transition picker with 20 moves: long 3-band EQ blends, bass swaps, phrase blends, filter blends, tempo handoffs, echo-outs, reverb washes, loop-and-echo outros, halving loop-roll builds, drop swaps, quick cuts, bass-out cuts on the 1, spinbacks, and power-downs
 - Each pair gets the move a working DJ would choose: blends when tempo and key lock, echo/reverb exits or cuts on the downbeat when they don't, builds into energy lifts, washes and power-downs into drops. It also reads where in the set the transition falls and the vibe ("open format party" leans on cuts, "smooth deep house" stays on blends), never repeats a move back to back, and keeps spinbacks/power-downs rare so they still land
 - Procedural transition SFX such as sweeps and downbeat impacts
 - Mix audio streaming through `GET /api/mixes/{mix_id}/audio`
@@ -142,7 +146,7 @@ http://127.0.0.1:8000/docs
 
 Folder selection uses browser folder-upload support. Dragging a whole folder also works in browsers that expose dropped folder entries, such as current Chromium-based browsers.
 
-Online song search is not wired to a commercial music provider yet. The link importer accepts direct MP3/WAV links from sources you are authorized to download. YouTube-to-MP3 ripping is intentionally blocked; to use YouTube content, use official YouTube download features, your own exported content, or a licensed source with rights-holder permission.
+Online songs come from Audius and Jamendo (see Online Music And Spotify). The link importer accepts direct MP3/WAV links from sources you are authorized to download. YouTube-to-MP3 ripping is intentionally blocked; to use YouTube content, use official YouTube download features, your own exported content, or a licensed source with rights-holder permission.
 
 Full DJ mixes can be used as reference audio. The app analyzes them for transition spacing, average excerpt length, phrase timing, phrase-boundary strength, energy-change behavior, spectral motion, SFX density, effect intensity, cue-point sensitivity, and preferred transition effects. Reference mixes are not added to the song library or live queue.
 
@@ -207,7 +211,43 @@ The response is ordered from best match to weakest match and includes a score br
 | `quick_cut` / `kill_cut` | Open format, hip-hop, tempo jumps | One-bar cut; `kill_cut` pulls the bass first, then the new song hits on the 1 |
 | `spinback` / `power_down` | Genre or tempo change (power-down for energy drops) | Vinyl backspin or turntable stop on the last beat, then the new song on the 1 |
 
+| `double_play` | Tempo and key locked (house, techno) | Both songs fully playing for 16 bars: incoming highs, then mids, one-beat bass swap on the middle downbeat, outgoing mids/highs leave, outgoing fader out |
+| `vocal_over` | Compatible pair with vocals | Outgoing song thinned to its vocal band (250 Hz-5 kHz, bass cut) riding over the incoming beat, then echoed out |
+| `filter_swap` | Beatmatchable pairs, light key clash | 8 bars: resonant high-pass sweeps the outgoing song away while a low-pass opens the incoming one |
+| `loop_riser` | Tempo jump up, genre change, energy lift | Repeat the last bar, halve the loop (4, 2, 1, 1/2 beats), speed it up and filter it, echo, next song on the 1 |
+| `key_lift` | Next song is a semitone or two up (Camelot +7/+2) | Outgoing loop pitches up a semitone into the new key, cut on the 1 |
+| `beat_juggle` | Locked tempo + key, party/hip-hop | Trade the songs back and forth (2, 2, 1, 1, 1/2... beats), then the new song stays |
+
 Name a move in the vibe box to force it (for example `spinback`, `power down`, `reverb wash`, `loop roll`, `slam on the one`, `eq blend`).
+
+## Online Music And Spotify
+
+**Audius** works out of the box. In Party Mode use **Online music**: search or press **Trending** (uses the genre filter or the playing song's genre), then **Add** or **Play Next**. The server streams the song, analyzes BPM/key/cues, saves it to the library with the artist credit and a link back, and the deck mixes it like any other song.
+
+**Jamendo** (Creative Commons): get a free client ID at https://devportal.jamendo.com and set it before starting the server:
+
+```powershell
+$env:AI_DJ_JAMENDO_CLIENT_ID="your-client-id"
+```
+
+**Spotify** is used only to pick songs. Spotify's Developer Policy forbids mixing, overlapping or segueing Spotify audio and its streams are DRM-protected, so the DJ never plays Spotify audio. Instead it reads your playlists and finds mixable copies:
+
+1. Create an app at https://developer.spotify.com/dashboard (Web API).
+2. Add the redirect URI `http://127.0.0.1:8000/api/spotify/callback` to the app.
+3. Set your Client ID (no client secret is needed; login uses PKCE) and start the server:
+
+   ```powershell
+   $env:AI_DJ_SPOTIFY_CLIENT_ID="your-client-id"
+   ..\.venv\Scripts\python.exe -m uvicorn app.main:app --reload
+   ```
+
+4. Open http://127.0.0.1:8000/ (use 127.0.0.1, not localhost), click **Connect Spotify**, choose a playlist, then **Add all** to queue every song that has a mixable copy.
+
+Songs only on Spotify (most major-label releases) won't have a copy on Audius; add your own MP3s for those.
+
+YouTube is not supported as an audio source: its terms forbid separating or downloading audio, and embedded players can't be routed into the mixer.
+
+Endpoints: `GET /api/sources`, `GET /api/sources/search`, `GET /api/sources/trending`, `POST /api/sources/import`, `GET /api/spotify/status`, `GET /api/spotify/playlists`, `GET /api/spotify/playlists/{id}/matches`.
 
 ## Swagger: Recommend The Next Song
 
@@ -338,7 +378,7 @@ The tests generate synthetic audio and do not require copyrighted music.
 - The renderer currently exports WAV only. MP3 export should be added with FFmpeg or a configured encoder.
 - Party Mode's "Live Mix" starts browser-side playback from selected files or saved tracks after local audio decoding. The final downloadable render still happens on the backend.
 - The live deck plays excerpts by default. Very long MP3s still need to be decoded by the browser before live playback starts.
-- Online song search requires a licensed provider integration before full external songs can be selected without local files.
+- Online music is limited to what Audius/Jamendo carry; Spotify can only pick songs, not supply audio.
 - Reference DJ mixes train a deterministic local style profile, not a neural model. It learns usable transition defaults from the audio patterns.
 - The mix direction steers ordering, transition length, and SFX style. It does not transform the source songs into a new genre.
 - Rendering runs in-process in this MVP. Job records exist, but Redis/Celery/RQ are not wired in yet.
