@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>AI DJ Party Mode</title>
     <link rel="stylesheet" href="/static/styles.css" />
+    <link rel="stylesheet" href="/static/dj-rig.css" />
   </head>
   <body>
     <header class="topbar">
@@ -179,6 +180,7 @@
             <span class="live-dot"></span>
             <span id="deckState">Deck ready</span>
           </div>
+          <div id="djRig" class="dj-stage" aria-hidden="true"></div>
           <div class="deck-content">
             <div class="turntable-visual" aria-hidden="true">
               <div class="vinyl-record">
@@ -286,6 +288,7 @@
       </section>
     </main>
 
+    <script src="/static/dj-rig.js"></script>
     <script src="/static/app.js"></script>
   </body>
 </html>

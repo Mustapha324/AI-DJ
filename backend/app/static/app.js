@@ -870,6 +870,7 @@ function updateDeckDisplay() {
   );
   els.upNextTitle.textContent = next?.name || "Waiting for your queue";
   els.upNextMeta.textContent = next?.meta || "AI will line up the set";
+  window.djRig?.update({ live: isLive, bpm: current?.bpm || null });
 }
 
 function handleQueueDragStart(event) {
@@ -1455,6 +1456,11 @@ function transitionToNextTrack(manual) {
   const plannedTransition = plannedTransitionBetween(currentTrack, nextTrack);
   const technique = plannedTransition?.technique || "phrase_blend";
   const transitionEffects = liveTransitionEffects(currentTrack, nextTrack);
+  try {
+    window.djRig?.pulse(`Mixing into ${nextTrack?.name || "the next track"}`);
+  } catch (error) {
+    console.warn("The DJ animation could not react to this transition.", error);
+  }
   const playbackRate = aiPlaybackRateForNext(nextTrack, technique);
   const nextOffset = liveTrackStartOffset(nextTrack);
   const nextWindow = livePreTransitionWindow(

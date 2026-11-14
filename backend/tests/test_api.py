@@ -15,6 +15,9 @@ def test_party_mode_page_loads(client):
     assert "Party Mode" in response.text
     assert "Studio Mode" in response.text
     assert 'class="turntable-visual"' in response.text
+    assert 'id="djRig" class="dj-stage"' in response.text
+    assert '/static/dj-rig.js' in response.text
+    assert '/static/dj-rig.css' in response.text
     assert 'id="genreFilter"' in response.text
     assert 'id="transitionSeconds" type="number" min="2" max="12" step="1" value="6"' in response.text
     assert "/docs" in response.text
@@ -329,3 +332,13 @@ def test_saved_track_audio_can_be_retrieved(client, synthetic_mp3_named_uploads)
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("audio/mpeg")
     assert len(response.content) > 44
+
+
+def test_robot_dj_assets_are_served(client):
+    script = client.get("/static/dj-rig.js")
+    styles = client.get("/static/dj-rig.css")
+
+    assert script.status_code == 200
+    assert "window.djRig" in script.text
+    assert styles.status_code == 200
+    assert ".deck-stage:not(.is-live) .dj-perf" in styles.text
