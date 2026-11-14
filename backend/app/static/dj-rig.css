@@ -1,0 +1,1145 @@
+/* 3D cyberpunk robot DJ (see dj-rig.js). Animations run while the deck is live. */
+
+.dj-stage {
+  --dj-a: #00f0ff;
+  --dj-b: var(--hot, #ff4f72);
+  --dj-c: #f9e94b;
+  --dj-scale: 0.76;
+  position: relative;
+  height: 400px;
+  border: 1px solid #23253a;
+  border-radius: 8px;
+  overflow: hidden;
+  background: #05060b;
+  container-type: inline-size;
+  isolation: isolate;
+}
+
+.deck-stage {
+  --dj-beat: 0.484s;
+}
+
+/* ---------- Backdrop ---------- */
+.dj-backdrop,
+.dj-sky,
+.dj-rain,
+.dj-scanlines,
+.dj-flash,
+.dj-viewport {
+  position: absolute;
+  inset: 0;
+}
+
+.dj-sky {
+  background:
+    radial-gradient(ellipse 70% 45% at 50% 70%, rgba(255, 42, 109, 0.32), transparent 70%),
+    radial-gradient(ellipse 60% 50% at 50% 20%, rgba(0, 240, 255, 0.14), transparent 70%),
+    linear-gradient(180deg, #07061a 0%, #120a2a 55%, #05060b 100%);
+}
+
+.dj-skyline {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 30%;
+  height: 240px;
+}
+
+.dj-tower {
+  position: absolute;
+  bottom: 0;
+  background:
+    repeating-linear-gradient(0deg, transparent 0 7px, rgba(0, 240, 255, 0.16) 7px 9px),
+    repeating-linear-gradient(90deg, #0b0c18 0 5px, transparent 5px 9px),
+    #0b0c18;
+  box-shadow: inset 0 1px 0 rgba(255, 42, 109, 0.4);
+  opacity: 0.85;
+}
+
+.dj-tower:nth-child(3n) {
+  background:
+    repeating-linear-gradient(0deg, transparent 0 9px, rgba(255, 42, 109, 0.16) 9px 11px),
+    repeating-linear-gradient(90deg, #0a0b16 0 6px, transparent 6px 10px),
+    #0a0b16;
+}
+
+.dj-tower.lit::before {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: -14px;
+  width: 2px;
+  height: 14px;
+  background: #3a3d55;
+}
+
+.dj-tower.lit::after {
+  content: "";
+  position: absolute;
+  left: calc(50% - 3px);
+  top: -18px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--dj-b);
+  box-shadow: 0 0 10px var(--dj-b);
+  animation: dj-blink 1.6s steps(2, start) infinite;
+}
+
+.dj-sign {
+  position: absolute;
+  padding: 10px 6px;
+  writing-mode: vertical-rl;
+  font-family: ui-monospace, "SFMono-Regular", Menlo, monospace;
+  font-size: 13px;
+  font-weight: 800;
+  letter-spacing: 0.3em;
+  border: 2px solid currentColor;
+  border-radius: 4px;
+  text-shadow: 0 0 8px currentColor;
+  box-shadow: 0 0 16px currentColor, inset 0 0 10px currentColor;
+  animation: dj-flicker 6s infinite;
+}
+
+.dj-sign-a {
+  left: 5%;
+  top: 14%;
+  color: var(--dj-b);
+}
+
+.dj-sign-b {
+  right: 5%;
+  top: 22%;
+  color: var(--dj-a);
+  animation-delay: -2.4s;
+}
+
+.dj-beam {
+  position: absolute;
+  top: -20px;
+  width: 4px;
+  height: 460px;
+  transform-origin: 50% 0;
+  background: linear-gradient(var(--dj-a), transparent 80%);
+  box-shadow: 0 0 24px var(--dj-a);
+  mix-blend-mode: screen;
+  opacity: 0.12;
+  animation: dj-sweep calc(var(--dj-beat) * 4) ease-in-out infinite alternate;
+  animation-play-state: paused;
+}
+
+.dj-beam.b1 { left: 14%; animation-delay: -0.4s; }
+.dj-beam.b2 { left: 28%; animation-delay: -1.2s; background: linear-gradient(var(--dj-b), transparent 80%); box-shadow: 0 0 24px var(--dj-b); }
+.dj-beam.b3 { left: 42%; animation-delay: -2s; }
+.dj-beam.b4 { left: 58%; animation-delay: -0.8s; background: linear-gradient(var(--dj-b), transparent 80%); box-shadow: 0 0 24px var(--dj-b); }
+.dj-beam.b5 { left: 72%; animation-delay: -1.6s; }
+.dj-beam.b6 { left: 86%; animation-delay: -2.4s; background: linear-gradient(var(--dj-b), transparent 80%); box-shadow: 0 0 24px var(--dj-b); }
+
+.dj-halo {
+  position: absolute;
+  left: 50%;
+  top: 6%;
+  width: 360px;
+  height: 360px;
+  margin-left: -180px;
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(0, 240, 255, 0.28), rgba(255, 42, 109, 0.12) 45%, transparent 68%);
+  animation: dj-pulse var(--dj-beat) ease-out infinite;
+  animation-play-state: paused;
+}
+
+.dj-rain {
+  background-image: repeating-linear-gradient(105deg, transparent 0 22px, rgba(0, 240, 255, 0.07) 22px 23px);
+  background-size: 200px 200px;
+  animation: dj-rain 0.9s linear infinite;
+  pointer-events: none;
+}
+
+.dj-scanlines {
+  pointer-events: none;
+  background:
+    repeating-linear-gradient(0deg, rgba(0, 0, 0, 0.22) 0 1px, transparent 1px 3px),
+    radial-gradient(ellipse at 50% 50%, transparent 55%, rgba(0, 0, 0, 0.6) 100%);
+  z-index: 3;
+}
+
+.dj-flash {
+  pointer-events: none;
+  opacity: 0;
+  z-index: 4;
+  background: radial-gradient(circle at 50% 35%, #ffffff, var(--dj-a) 30%, rgba(255, 42, 109, 0.4) 55%, transparent 75%);
+  mix-blend-mode: screen;
+}
+
+/* ---------- 3D world ---------- */
+.dj-viewport {
+  perspective: 1100px;
+  perspective-origin: 50% 30%;
+  z-index: 2;
+}
+
+.dj-world {
+  position: absolute;
+  left: 50%;
+  top: 55%;
+  transform-style: preserve-3d;
+  transform: scale(var(--dj-scale)) rotateX(-12deg) rotateY(-14deg);
+  animation: dj-orbit 14s ease-in-out infinite;
+}
+
+.dj-world .dj-pos,
+.dj-world .dj-box,
+.dj-world .dj-f,
+.dj-world .dj-deck-top,
+.dj-world .dj-platter {
+  transform-style: preserve-3d;
+}
+
+.dj-pos {
+  position: absolute;
+  left: 0;
+  top: 0;
+}
+
+.dj-box {
+  position: absolute;
+  width: var(--w);
+  height: var(--h);
+  left: calc(var(--w) / -2);
+  top: calc(var(--h) / -2);
+}
+
+.dj-f {
+  position: absolute;
+  left: 0;
+  top: 0;
+  box-sizing: border-box;
+  backface-visibility: hidden;
+}
+
+.dj-front,
+.dj-back {
+  width: var(--w);
+  height: var(--h);
+}
+
+.dj-front { transform: translateZ(calc(var(--d) / 2)); }
+.dj-back { transform: rotateY(180deg) translateZ(calc(var(--d) / 2)); }
+
+.dj-left,
+.dj-right {
+  width: var(--d);
+  height: var(--h);
+  left: calc((var(--w) - var(--d)) / 2);
+}
+
+.dj-right { transform: rotateY(90deg) translateZ(calc(var(--w) / 2)); }
+.dj-left { transform: rotateY(-90deg) translateZ(calc(var(--w) / 2)); }
+
+.dj-top,
+.dj-bottom {
+  width: var(--w);
+  height: var(--d);
+  top: calc((var(--h) - var(--d)) / 2);
+}
+
+.dj-top { transform: rotateX(90deg) translateZ(calc(var(--h) / 2)); }
+.dj-bottom { transform: rotateX(-90deg) translateZ(calc(var(--h) / 2)); }
+
+/* Materials */
+.dj-metal .dj-f {
+  background: linear-gradient(160deg, #2b3049 0%, #181b2a 58%, #10121c 100%);
+  border: 1px solid rgba(0, 240, 255, 0.3);
+}
+
+.dj-metal > .dj-left,
+.dj-metal > .dj-right {
+  background: linear-gradient(180deg, #1a1d2d, #0d0f18);
+}
+
+.dj-metal > .dj-top {
+  background: linear-gradient(180deg, #3d4364, #252a40);
+}
+
+.dj-metal > .dj-bottom {
+  background: #06070c;
+}
+
+.dj-dark > .dj-f {
+  background: linear-gradient(160deg, #1b1e2d, #0e1018);
+  border-color: rgba(255, 42, 109, 0.3);
+}
+
+/* Floor + hologram */
+.dj-floor {
+  position: absolute;
+  width: 1400px;
+  height: 900px;
+  left: -700px;
+  top: -450px;
+  background-image:
+    linear-gradient(rgba(0, 240, 255, 0.35) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 42, 109, 0.3) 1px, transparent 1px);
+  background-size: 50px 50px;
+  -webkit-mask-image: radial-gradient(ellipse at 50% 50%, #000 15%, transparent 60%);
+  mask-image: radial-gradient(ellipse at 50% 50%, #000 15%, transparent 60%);
+  animation: dj-floor calc(var(--dj-beat) * 2) linear infinite;
+  animation-play-state: paused;
+}
+
+.dj-ring {
+  position: absolute;
+  border-radius: 50%;
+}
+
+.dj-ring.r1 {
+  width: 420px;
+  height: 420px;
+  left: -210px;
+  top: -210px;
+  border: 2px dashed rgba(0, 240, 255, 0.7);
+  box-shadow: 0 0 24px rgba(0, 240, 255, 0.35), inset 0 0 24px rgba(0, 240, 255, 0.2);
+}
+
+.dj-ring.r2 {
+  width: 320px;
+  height: 320px;
+  left: -160px;
+  top: -160px;
+  border: 1px solid rgba(255, 42, 109, 0.7);
+  border-left-color: transparent;
+  border-right-color: transparent;
+  box-shadow: 0 0 18px rgba(255, 42, 109, 0.35);
+}
+
+.dj-ring-spin {
+  animation: dj-spin 10s linear infinite;
+}
+
+.dj-ring-spin.rev {
+  animation-direction: reverse;
+  animation-duration: 7s;
+}
+
+/* ---------- Robot ---------- */
+.dj-bounce {
+  animation: dj-bounce var(--dj-beat) ease-in-out infinite;
+}
+
+.dj-torso > .dj-front {
+  border-color: rgba(0, 240, 255, 0.45);
+}
+
+.dj-chest {
+  position: absolute;
+  inset: 0;
+}
+
+.dj-shoulder-line {
+  position: absolute;
+  left: 10px;
+  right: 10px;
+  top: 14px;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, var(--dj-a), transparent);
+  box-shadow: 0 0 8px var(--dj-a);
+}
+
+.dj-core {
+  position: absolute;
+  left: 46px;
+  top: 34px;
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  border: 2px solid var(--dj-a);
+  background: conic-gradient(from 0deg, var(--dj-a), transparent 25%, var(--dj-b) 50%, transparent 75%, var(--dj-a));
+  box-shadow: 0 0 22px var(--dj-a), inset 0 0 12px rgba(0, 0, 0, 0.8);
+  animation: dj-spin 2.4s linear infinite;
+}
+
+.dj-core i {
+  position: absolute;
+  inset: 12px;
+  border-radius: 50%;
+  background: #eafeff;
+  box-shadow: 0 0 16px var(--dj-a), 0 0 30px var(--dj-a);
+  animation: dj-pulse var(--dj-beat) ease-out infinite;
+}
+
+.dj-serial {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 92px;
+  text-align: center;
+  color: var(--dj-a);
+  font-family: ui-monospace, "SFMono-Regular", Menlo, monospace;
+  font-size: 8px;
+  letter-spacing: 0.2em;
+  text-shadow: 0 0 6px var(--dj-a);
+}
+
+.dj-vents {
+  position: absolute;
+  left: 30px;
+  right: 30px;
+  top: 108px;
+  display: grid;
+  gap: 4px;
+}
+
+.dj-vents i {
+  height: 3px;
+  border-radius: 2px;
+  background: #07080e;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+
+.dj-hazard {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 10px;
+  background: repeating-linear-gradient(135deg, var(--dj-c) 0 8px, #0b0c12 8px 16px);
+  opacity: 0.9;
+}
+
+.dj-ribs {
+  position: absolute;
+  inset: 16px 10px;
+  background: repeating-linear-gradient(0deg, transparent 0 8px, rgba(0, 240, 255, 0.18) 8px 9px);
+}
+
+.dj-cables {
+  position: absolute;
+  inset: 14px 30px;
+  display: flex;
+  justify-content: space-between;
+}
+
+.dj-cables i {
+  width: 8px;
+  border-radius: 4px;
+  background: linear-gradient(var(--dj-b), #2a0b17);
+}
+
+.dj-neck-glow {
+  position: absolute;
+  left: 4px;
+  right: 4px;
+  top: 10px;
+  height: 4px;
+  background: var(--dj-b);
+  box-shadow: 0 0 10px var(--dj-b);
+}
+
+.dj-pad-led {
+  position: absolute;
+  left: 8px;
+  top: 8px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--dj-b);
+  box-shadow: 0 0 10px var(--dj-b);
+}
+
+.dj-pad-stripe {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 18px;
+  height: 8px;
+  background: repeating-linear-gradient(135deg, var(--dj-c) 0 6px, #0b0c12 6px 12px);
+}
+
+/* Head */
+.dj-head-bob {
+  animation: dj-head-bob calc(var(--dj-beat) * 2) ease-in-out infinite;
+}
+
+.dj-head > .dj-front {
+  border-color: rgba(0, 240, 255, 0.5);
+  background: linear-gradient(170deg, #343a59 0%, #1a1d2e 60%, #10121c 100%);
+}
+
+.dj-brow {
+  position: absolute;
+  left: 14px;
+  right: 14px;
+  top: 14px;
+  height: 3px;
+  background: repeating-linear-gradient(90deg, var(--dj-b) 0 10px, transparent 10px 14px);
+  box-shadow: 0 0 8px var(--dj-b);
+}
+
+.dj-visor {
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  top: 28px;
+  height: 26px;
+  border-radius: 4px;
+  overflow: hidden;
+  background: linear-gradient(180deg, #020309, #0a0d1d);
+  border: 1px solid var(--dj-a);
+  box-shadow: 0 0 18px rgba(0, 240, 255, 0.55), inset 0 0 10px rgba(0, 0, 0, 0.9);
+  animation: dj-glitch 5s steps(1) infinite;
+}
+
+.dj-scan {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 24px;
+  height: 100%;
+  background: linear-gradient(90deg, transparent, rgba(255, 42, 109, 0.9), transparent);
+  animation: dj-scan 1.4s ease-in-out infinite alternate;
+}
+
+.dj-eye {
+  position: absolute;
+  top: 9px;
+  width: 22px;
+  height: 7px;
+  background: var(--dj-a);
+  clip-path: polygon(0 0, 100% 0, 85% 100%, 15% 100%);
+  box-shadow: 0 0 10px var(--dj-a);
+  filter: drop-shadow(0 0 6px var(--dj-a));
+  animation: dj-eye 4s infinite;
+}
+
+.dj-eye.l { left: 16px; }
+.dj-eye.r { right: 16px; }
+
+.dj-grill {
+  position: absolute;
+  left: 30px;
+  right: 30px;
+  top: 64px;
+  height: 12px;
+  display: flex;
+  gap: 3px;
+  align-items: center;
+}
+
+.dj-grill i {
+  flex: 1;
+  height: 12px;
+  border-radius: 1px;
+  background: var(--dj-b);
+  box-shadow: 0 0 6px var(--dj-b);
+  animation: dj-talk calc(var(--dj-beat) / 2) ease-in-out infinite;
+}
+
+.dj-grill i:nth-child(2) { animation-delay: -0.08s; }
+.dj-grill i:nth-child(3) { animation-delay: -0.16s; }
+.dj-grill i:nth-child(4) { animation-delay: -0.04s; }
+.dj-grill i:nth-child(5) { animation-delay: -0.12s; }
+
+.dj-cheek {
+  position: absolute;
+  top: 62px;
+  width: 10px;
+  height: 18px;
+  background: repeating-linear-gradient(0deg, rgba(0, 240, 255, 0.5) 0 2px, transparent 2px 4px);
+}
+
+.dj-cheek.l { left: 10px; }
+.dj-cheek.r { right: 10px; }
+
+.dj-circuit {
+  position: absolute;
+  inset: 10px;
+  background:
+    linear-gradient(90deg, transparent 30%, rgba(0, 240, 255, 0.4) 30% 32%, transparent 32%),
+    linear-gradient(0deg, transparent 60%, rgba(0, 240, 255, 0.4) 60% 62%, transparent 62%),
+    linear-gradient(90deg, transparent 70%, rgba(255, 42, 109, 0.4) 70% 72%, transparent 72%);
+}
+
+.dj-side-led {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  width: 6px;
+  height: 6px;
+  background: var(--dj-c);
+  box-shadow: 0 0 8px var(--dj-c);
+}
+
+.dj-top-seam {
+  position: absolute;
+  left: 50%;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: rgba(0, 240, 255, 0.4);
+}
+
+.dj-neon-fin > .dj-f {
+  background: linear-gradient(180deg, var(--dj-b), #3a0a1c);
+  box-shadow: 0 0 14px var(--dj-b);
+}
+
+.dj-cup > .dj-left,
+.dj-cup > .dj-right {
+  background: radial-gradient(circle, #2c3150, #10121c 70%);
+}
+
+.dj-cup-ring {
+  position: absolute;
+  inset: 9px;
+  border-radius: 50%;
+  border: 2px solid var(--dj-a);
+  box-shadow: 0 0 12px var(--dj-a), inset 0 0 8px var(--dj-a);
+}
+
+.dj-mic > .dj-f {
+  background: #10121c;
+  border: 1px solid var(--dj-b);
+  box-shadow: 0 0 8px var(--dj-b);
+}
+
+.dj-antenna-tip > .dj-f {
+  background: var(--dj-b);
+  box-shadow: 0 0 14px var(--dj-b);
+  animation: dj-blink 1.2s steps(2, start) infinite;
+}
+
+/* Arms */
+.dj-upper.l {
+  transform: rotateZ(30deg) rotateX(10deg);
+  animation: dj-upper-l calc(var(--dj-beat) / 2) ease-in-out infinite;
+}
+
+.dj-fore.l {
+  transform: rotateX(60deg) rotateZ(-10deg);
+  animation: dj-fore-l calc(var(--dj-beat) / 2) ease-in-out infinite;
+}
+
+.dj-upper.r {
+  transform: rotateZ(-30deg) rotateX(10deg);
+  animation: dj-upper-r calc(var(--dj-beat) * 8) ease-in-out infinite;
+}
+
+.dj-fore.r {
+  transform: rotateX(60deg) rotateZ(0deg);
+  animation: dj-fore-r calc(var(--dj-beat) * 8) ease-in-out infinite;
+}
+
+.dj-arm-stripe {
+  position: absolute;
+  left: 40%;
+  width: 20%;
+  top: 12px;
+  bottom: 12px;
+  background: var(--dj-a);
+  box-shadow: 0 0 8px var(--dj-a);
+  opacity: 0.8;
+}
+
+.dj-cuff > .dj-f {
+  background: var(--dj-b);
+  box-shadow: 0 0 12px var(--dj-b);
+}
+
+.dj-knuckles {
+  position: absolute;
+  left: 4px;
+  right: 4px;
+  top: 6px;
+  height: 4px;
+  background: repeating-linear-gradient(90deg, rgba(0, 240, 255, 0.6) 0 5px, transparent 5px 8px);
+}
+
+.dj-palm-glow {
+  position: absolute;
+  inset: 8px;
+  border-radius: 50%;
+  background: var(--dj-a);
+  box-shadow: 0 0 14px var(--dj-a);
+}
+
+/* ---------- Booth ---------- */
+.dj-booth > .dj-top {
+  background:
+    linear-gradient(180deg, rgba(0, 240, 255, 0.06), transparent 30%),
+    linear-gradient(180deg, #1e2133, #11131e);
+  border: 1px solid rgba(0, 240, 255, 0.45);
+  box-shadow: inset 0 0 30px rgba(0, 240, 255, 0.12);
+}
+
+.dj-deck-top {
+  position: absolute;
+  inset: 0;
+}
+
+.dj-platter {
+  position: absolute;
+  top: 10px;
+  width: 150px;
+  height: 150px;
+  border-radius: 50%;
+  background: radial-gradient(circle, #23263a 0 62%, #3b4060 64%, #161825 68%, #2c3049 100%);
+  box-shadow: 0 0 0 2px #090a12, 0 0 18px rgba(0, 240, 255, 0.25);
+  transform: translateZ(5px);
+}
+
+.dj-platter.l { left: 30px; }
+.dj-platter.r { right: 30px; }
+
+.dj-platter-ring {
+  position: absolute;
+  inset: -6px;
+  border-radius: 50%;
+  border: 2px dashed rgba(0, 240, 255, 0.75);
+  animation: dj-spin 6s linear infinite;
+}
+
+.dj-platter.r .dj-platter-ring {
+  border-color: rgba(255, 42, 109, 0.75);
+  animation-direction: reverse;
+}
+
+.dj-vinyl {
+  position: absolute;
+  inset: 10px;
+  border-radius: 50%;
+  background: repeating-radial-gradient(circle at 50% 50%, #0a0a0f 0 1.5px, #17171f 1.5px 3px);
+  animation: dj-spin 1.8s linear infinite;
+}
+
+.dj-vinyl-scratch {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+}
+
+.dj-platter.l .dj-vinyl-scratch {
+  animation: dj-scratch calc(var(--dj-beat) / 2) ease-in-out infinite;
+}
+
+.dj-vinyl-label {
+  position: absolute;
+  inset: 34%;
+  border-radius: 50%;
+  background: radial-gradient(circle, #05060b 0 3px, var(--dj-a) 4px);
+  box-shadow: 0 0 12px var(--dj-a);
+}
+
+.dj-platter.r .dj-vinyl-label {
+  background: radial-gradient(circle, #05060b 0 3px, var(--dj-b) 4px);
+  box-shadow: 0 0 12px var(--dj-b);
+}
+
+.dj-vinyl-mark {
+  position: absolute;
+  left: calc(50% - 3px);
+  top: 6px;
+  width: 6px;
+  height: 22px;
+  border-radius: 3px;
+  background: #f4f4f2;
+}
+
+.dj-vinyl-sheen {
+  position: absolute;
+  inset: 10px;
+  border-radius: 50%;
+  background: conic-gradient(from 20deg, transparent 0 18%, rgba(255, 255, 255, 0.12) 24%, transparent 30% 68%, rgba(255, 255, 255, 0.08) 74%, transparent 80%);
+  pointer-events: none;
+}
+
+.dj-tonearm {
+  position: absolute;
+  top: 12px;
+  width: 7px;
+  height: 104px;
+  border-radius: 4px;
+  background: linear-gradient(#d6d8e4, #6e7088);
+  transform-origin: 50% 6px;
+  transform: translateZ(9px) rotate(24deg);
+}
+
+.dj-tonearm.l { left: 184px; }
+.dj-tonearm.r { left: 534px; }
+
+.dj-mixer {
+  position: absolute;
+  left: 205px;
+  top: 10px;
+  width: 150px;
+  height: 150px;
+  border-radius: 10px;
+  background: linear-gradient(180deg, #161827, #0b0c14);
+  border: 1px solid rgba(255, 42, 109, 0.5);
+  box-shadow: 0 0 16px rgba(255, 42, 109, 0.2);
+  transform: translateZ(3px);
+}
+
+.dj-knob {
+  position: absolute;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: radial-gradient(circle at 40% 35%, #5a5f84, #222539 70%);
+}
+
+.dj-knob::after {
+  content: "";
+  position: absolute;
+  left: 10px;
+  top: 2px;
+  width: 2px;
+  height: 8px;
+  background: var(--dj-a);
+  box-shadow: 0 0 6px var(--dj-a);
+}
+
+.dj-knob.tw {
+  animation: dj-twist calc(var(--dj-beat) * 4) ease-in-out infinite;
+}
+
+.dj-meter {
+  position: absolute;
+  top: 12px;
+  width: 10px;
+  height: 80px;
+  background: repeating-linear-gradient(0deg, var(--dj-a) 0 5px, transparent 5px 8px);
+  transform-origin: 50% 100%;
+  animation: dj-meter var(--dj-beat) ease-in-out infinite;
+}
+
+.dj-meter.b {
+  background: repeating-linear-gradient(0deg, var(--dj-b) 0 5px, transparent 5px 8px);
+  animation-delay: -0.2s;
+}
+
+.dj-ftrack {
+  position: absolute;
+  top: 100px;
+  width: 4px;
+  height: 28px;
+  border-radius: 2px;
+  background: #04050a;
+}
+
+.dj-ftrack i {
+  position: absolute;
+  left: -8px;
+  top: 0;
+  width: 20px;
+  height: 9px;
+  border-radius: 2px;
+  background: linear-gradient(#e6e7ee, #8c8ea4);
+  animation: dj-fader calc(var(--dj-beat) * 4) ease-in-out infinite;
+}
+
+.dj-xtrack {
+  position: absolute;
+  left: 35px;
+  top: 138px;
+  width: 80px;
+  height: 4px;
+  border-radius: 2px;
+  background: #04050a;
+}
+
+.dj-xtrack i {
+  position: absolute;
+  left: 0;
+  top: -6px;
+  width: 12px;
+  height: 16px;
+  border-radius: 2px;
+  background: linear-gradient(90deg, #e6e7ee, #8c8ea4);
+  animation: dj-xfade calc(var(--dj-beat) * 8) ease-in-out infinite;
+}
+
+.dj-booth > .dj-front {
+  background: linear-gradient(180deg, #1a1c2b, #090a11);
+  border: 1px solid rgba(0, 240, 255, 0.45);
+  overflow: hidden;
+}
+
+.dj-booth-front {
+  position: absolute;
+  inset: 0;
+}
+
+.dj-booth-strip {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 3px;
+  background: linear-gradient(90deg, var(--dj-a), var(--dj-b), var(--dj-a));
+  box-shadow: 0 0 18px var(--dj-a);
+}
+
+.dj-booth-hazard {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 46px;
+  background: repeating-linear-gradient(135deg, var(--dj-c) 0 10px, #0b0c12 10px 20px);
+  opacity: 0.85;
+}
+
+.dj-booth-hazard.l { left: 0; }
+.dj-booth-hazard.r { right: 0; }
+
+.dj-booth-word {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 16px;
+  text-align: center;
+  color: #eafeff;
+  font-size: 18px;
+  font-weight: 900;
+  letter-spacing: 0.45em;
+  text-shadow: 0 0 10px var(--dj-a), 0 0 22px var(--dj-a), 2px 0 0 var(--dj-b);
+}
+
+.dj-booth-leds {
+  position: absolute;
+  left: 64px;
+  right: 64px;
+  top: 52px;
+  height: 8px;
+  background-image: radial-gradient(circle, var(--dj-b) 2px, transparent 3px);
+  background-size: 20px 8px;
+  animation: dj-chase calc(var(--dj-beat) * 2) linear infinite;
+}
+
+.dj-booth-grid {
+  position: absolute;
+  left: 64px;
+  right: 64px;
+  bottom: 6px;
+  height: 8px;
+  background: repeating-linear-gradient(90deg, rgba(0, 240, 255, 0.35) 0 2px, transparent 2px 6px);
+}
+
+/* ---------- HUD ---------- */
+.dj-hud {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  pointer-events: none;
+  font-family: ui-monospace, "SFMono-Regular", Menlo, monospace;
+}
+
+.dj-hud-tag,
+.dj-hud-bpm,
+.dj-hud-ticker {
+  position: absolute;
+  border: 1px solid rgba(0, 240, 255, 0.45);
+  background: rgba(4, 5, 12, 0.78);
+  color: #eafeff;
+  border-radius: 4px;
+  clip-path: polygon(0 0, calc(100% - 10px) 0, 100% 10px, 100% 100%, 10px 100%, 0 calc(100% - 10px));
+}
+
+.dj-hud-tag {
+  left: 12px;
+  top: 12px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 14px;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+.dj-hud-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #686870;
+}
+
+.deck-stage.is-live .dj-hud-dot {
+  background: var(--dj-b);
+  box-shadow: 0 0 10px var(--dj-b);
+  animation: dj-pulse var(--dj-beat) ease-out infinite;
+}
+
+.dj-hud-bpm {
+  right: 12px;
+  top: 12px;
+  padding: 8px 14px;
+  text-align: right;
+  display: grid;
+}
+
+.dj-hud-bpm strong {
+  font-size: 26px;
+  line-height: 1;
+  color: var(--dj-a);
+  text-shadow: 0 0 10px var(--dj-a);
+}
+
+.dj-hud-bpm span {
+  font-size: 10px;
+  letter-spacing: 0.24em;
+  color: #a1a1aa;
+}
+
+.dj-hud-ticker {
+  left: 12px;
+  bottom: 12px;
+  padding: 7px 14px;
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  border-color: rgba(255, 42, 109, 0.55);
+}
+
+.dj-hud-ticker::before {
+  content: "AI ▸ ";
+  color: var(--dj-b);
+  font-weight: 800;
+}
+
+/* ---------- Live gating ---------- */
+.deck-stage:not(.is-live) .dj-perf,
+.deck-stage:not(.is-live) .dj-perf::after {
+  animation-play-state: paused;
+}
+
+.deck-stage.is-live .dj-beam,
+.deck-stage.is-live .dj-halo,
+.deck-stage.is-live .dj-floor {
+  animation-play-state: running;
+}
+
+.deck-stage.is-live .dj-beam {
+  opacity: 0.42;
+}
+
+.deck-stage:not(.is-live) .dj-eye,
+.deck-stage:not(.is-live) .dj-grill i,
+.deck-stage:not(.is-live) .dj-scan {
+  animation-play-state: paused;
+  opacity: 0.45;
+}
+
+.deck-stage.dj-drop .dj-flash {
+  animation: dj-flash 0.6s ease-out 4;
+}
+
+.deck-stage.dj-drop .dj-beam {
+  animation-duration: var(--dj-beat);
+  opacity: 0.7;
+}
+
+/* ---------- Responsive ---------- */
+@container (max-width: 720px) {
+  .dj-world { --dj-scale: 0.6; }
+}
+
+@container (max-width: 520px) {
+  .dj-world { --dj-scale: 0.44; top: 60%; }
+  .dj-sign,
+  .dj-hud-ticker { display: none; }
+}
+
+@media (max-width: 720px) {
+  .dj-stage { height: 320px; }
+}
+
+@media (max-width: 480px) {
+  .dj-stage { height: 290px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dj-stage *,
+  .dj-stage *::before,
+  .dj-stage *::after {
+    animation-play-state: paused !important;
+  }
+}
+
+/* ---------- Keyframes ---------- */
+@keyframes dj-orbit {
+  0%, 100% { transform: scale(var(--dj-scale)) rotateX(-12deg) rotateY(-16deg); }
+  50% { transform: scale(var(--dj-scale)) rotateX(-8deg) rotateY(16deg); }
+}
+
+@keyframes dj-bounce {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(6px); }
+}
+
+@keyframes dj-head-bob {
+  0%, 100% { transform: rotateX(6deg) rotateY(-10deg); }
+  25% { transform: rotateX(-7deg) rotateY(0deg); }
+  50% { transform: rotateX(6deg) rotateY(10deg); }
+  75% { transform: rotateX(-7deg) rotateY(0deg); }
+}
+
+@keyframes dj-upper-l {
+  0%, 100% { transform: rotateZ(30deg) rotateX(10deg); }
+  50% { transform: rotateZ(26deg) rotateX(15deg); }
+}
+
+@keyframes dj-fore-l {
+  0%, 100% { transform: rotateX(60deg) rotateZ(-12deg); }
+  50% { transform: rotateX(55deg) rotateZ(12deg); }
+}
+
+@keyframes dj-upper-r {
+  0%, 56% { transform: rotateZ(-30deg) rotateX(10deg); }
+  64% { transform: rotateZ(24deg) rotateX(150deg); }
+  68% { transform: rotateZ(24deg) rotateX(138deg); }
+  72% { transform: rotateZ(24deg) rotateX(154deg); }
+  76% { transform: rotateZ(24deg) rotateX(138deg); }
+  80% { transform: rotateZ(24deg) rotateX(154deg); }
+  84% { transform: rotateZ(24deg) rotateX(140deg); }
+  92%, 100% { transform: rotateZ(-30deg) rotateX(10deg); }
+}
+
+@keyframes dj-fore-r {
+  0% { transform: rotateX(60deg) rotateZ(0deg); }
+  12% { transform: rotateX(50deg) rotateZ(-6deg); }
+  24% { transform: rotateX(62deg) rotateZ(0deg); }
+  36% { transform: rotateX(52deg) rotateZ(6deg); }
+  48% { transform: rotateX(62deg) rotateZ(0deg); }
+  56% { transform: rotateX(60deg) rotateZ(0deg); }
+  64%, 84% { transform: rotateX(28deg) rotateZ(0deg); }
+  92%, 100% { transform: rotateX(60deg) rotateZ(0deg); }
+}
+
+@keyframes dj-spin { to { transform: rotate(360deg); } }
+@keyframes dj-scratch { 0%, 100% { transform: rotate(-26deg); } 50% { transform: rotate(26deg); } }
+@keyframes dj-pulse { 0% { transform: scale(1); } 35% { transform: scale(0.9); } 100% { transform: scale(1); } }
+@keyframes dj-sweep { 0% { transform: rotate(-28deg); } 100% { transform: rotate(28deg); } }
+@keyframes dj-floor { to { background-position: 0 50px, 0 0; } }
+@keyframes dj-rain { to { background-position: -40px 200px; } }
+@keyframes dj-meter { 0% { transform: scaleY(0.3); } 30% { transform: scaleY(1); } 60% { transform: scaleY(0.55); } 100% { transform: scaleY(0.3); } }
+@keyframes dj-fader { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(19px); } }
+@keyframes dj-xfade { 0%, 100% { transform: translateX(0); } 50% { transform: translateX(68px); } }
+@keyframes dj-twist { 0%, 100% { transform: rotate(-120deg); } 50% { transform: rotate(110deg); } }
+@keyframes dj-talk { 0%, 100% { transform: scaleY(0.35); } 50% { transform: scaleY(1); } }
+@keyframes dj-chase { to { background-position: 40px 0; } }
+@keyframes dj-scan { from { transform: translateX(0); } to { transform: translateX(64px); } }
+@keyframes dj-eye { 0%, 92%, 100% { transform: scaleY(1); } 95% { transform: scaleY(0.15); } }
+@keyframes dj-blink { 0% { opacity: 1; } 50% { opacity: 0.2; } }
+@keyframes dj-flash { 0% { opacity: 0.6; } 100% { opacity: 0; } }
+
+@keyframes dj-glitch {
+  0%, 88%, 100% { transform: none; filter: none; }
+  90% { transform: translate(2px, -1px) skewX(-8deg); filter: hue-rotate(90deg); }
+  92% { transform: translate(-2px, 1px); filter: hue-rotate(-60deg); }
+  94% { transform: none; filter: none; }
+}
+
+@keyframes dj-flicker {
+  0%, 18%, 22%, 62%, 64%, 100% { opacity: 1; }
+  20%, 63% { opacity: 0.35; }
+}
