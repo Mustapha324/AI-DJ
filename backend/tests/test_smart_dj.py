@@ -324,3 +324,68 @@ def test_new_moves_can_be_requested(direction, expected):
         "mix",
     )
     assert plan.transitions[0].technique == expected
+
+
+@pytest.mark.parametrize("technique", ["double_play", "vocal_over", "filter_swap", "loop_riser", "key_lift", "beat_juggle"])
+def test_deep_lane_moves_render(technique):
+    import numpy as np
+
+    from app.models.mix import MixTransition
+    from app.services.mix_renderer import _append_with_crossfade
+    from app.services.transition_recipes import build_lanes
+    from app.services.transition_selector import TECHNIQUES
+
+    sr = 22050
+    beat = 60.0 / 124.0
+    bars = TECHNIQUES[technique].fixed_bars
+    duration = bars * 4 * beat
+    transition = MixTransition(
+        source_track_id="a",
+        target_track_id="b",
+        source_transition_start=10.0,
+        source_transition_end=10.0 + duration,
+        target_transition_start=0.0,
+        target_transition_end=duration,
+        timeline_start_time=10.0,
+        timeline_end_time=10.0 + duration,
+        duration_seconds=duration,
+        bpm_adjustment_percent=0.0,
+        gain_adjustment_db=0.0,
+        crossfade_curve="equal_power",
+        transition_type="crossfade",
+        technique=technique,
+        beat_seconds=beat,
+        incoming_entry_position=TECHNIQUES[technique].incoming_entry,
+        compatibility_score=0.8,
+        automation=build_lanes(technique, bars, 1.05, duration),
+    )
+    current = _music(60.0)
+    incoming = _music(60.0, freq=330.0)
+    fade = int(duration * sr)
+    mixed = _append_with_crossfade(current, incoming, fade, sr, transition)
+
+    assert len(mixed) == len(current) + len(incoming) - fade
+    assert np.isfinite(mixed).all()
+    assert float(np.max(np.abs(mixed))) <= 1.0
+    overlap = mixed[len(current) - fade : len(current)]
+    # Something is always playing: no dead air in the middle of a deep transition.
+    quarter = len(overlap) // 4
+    for part in range(3):
+        chunk = overlap[part * quarter : (part + 1) * quarter]
+        assert float(np.sqrt(np.mean(chunk**2))) > 0.02
+
+
+def test_double_play_keeps_one_bassline_and_both_songs():
+    from app.services.automation_engine import lane_curve
+    from app.services.transition_recipes import build_lanes
+
+    lanes = build_lanes("double_play", 16, 1.0, 30.0)
+    n = 1000
+    out_low = lane_curve(lanes, "out", "low", n)
+    in_low = lane_curve(lanes, "in", "low", n)
+    in_gain = lane_curve(lanes, "in", "gain", n)
+    out_gain = lane_curve(lanes, "out", "gain", n)
+    both_bass = (out_low > -6) & (in_low > -6)
+    assert both_bass.sum() <= n * (1 / 64) + 2  # at most about one beat with two basslines
+    together = (in_gain > 0.5) & (out_gain > 0.5)
+    assert together.sum() > n * 0.6  # both songs audible for most of the window

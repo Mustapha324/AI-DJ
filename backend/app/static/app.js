@@ -42,7 +42,16 @@ const SAFE_TEMPO_RATIO = [0.94, 1.06];
 // Moves where the outgoing song does its own exit and the next song lands on the "1".
 const SLAM_MOVES = new Set(["kill_cut", "spinback", "power_down", "roll_build", "reverb_wash"]);
 // Moves whose length is fixed in bars by the planner (never stretched by the blend-seconds box).
-const BAR_LOCKED_MOVES = new Set([...SLAM_MOVES, "quick_cut"]);
+const BAR_LOCKED_MOVES = new Set([
+  ...SLAM_MOVES,
+  "quick_cut",
+  "double_play",
+  "vocal_over",
+  "filter_swap",
+  "loop_riser",
+  "key_lift",
+  "beat_juggle",
+]);
 
 const els = {
   dropZone: document.getElementById("dropZone"),
@@ -1764,7 +1773,8 @@ function transitionToNextTrack(manual) {
   );
   const nextSource = context.createBufferSource();
   const slamMove = SLAM_MOVES.has(technique);
-  const nextChannel = createLiveChannel(context, now, slamMove || technique === "eq_blend" ? 0 : -12);
+  const laneMove = Boolean(plannedTransition?.automation?.length);
+  const nextChannel = createLiveChannel(context, now, laneMove || slamMove || technique === "eq_blend" ? 0 : -12);
 
   nextSource.buffer = nextTrack.buffer;
   nextSource.playbackRate.setValueAtTime(playbackRate, now);
@@ -1784,7 +1794,9 @@ function transitionToNextTrack(manual) {
   // One beat of the outgoing song in real (wall-clock) seconds.
   const beatSeconds = (plannedTransition?.beat_seconds || 60 / (currentTrack.bpm || 120)) / Math.max(0.5, outgoingRate);
   let stopAt;
-  if (slamMove) {
+  if (plannedTransition?.automation?.length) {
+    stopAt = performAutomation(plannedTransition.automation, outgoing, nextChannel, now, transition, beatSeconds, plannedTransition.beat_seconds);
+  } else if (slamMove) {
     const entry = plannedTransition?.incoming_entry_position ?? (technique === "reverb_wash" ? 0.5 : 1);
     scheduleSlamIn(nextChannel.gain.gain, now, now + transition * entry);
     stopAt = scheduleOutgoingMove(technique, outgoing, now, transition, beatSeconds);
@@ -1960,7 +1972,9 @@ function scheduleTempoHandoff(source, currentRate, currentTrack, nextTrack, star
 
 function createLiveChannel(context, now, initialBassDb = 0) {
   const eq = context.createBiquadFilter();
+  const mid = context.createBiquadFilter();
   const treble = context.createBiquadFilter();
+  const hpf = context.createBiquadFilter();
   const filter = context.createBiquadFilter();
   const gain = context.createGain();
   const delay = context.createDelay(1.2);
@@ -1969,6 +1983,13 @@ function createLiveChannel(context, now, initialBassDb = 0) {
   eq.type = "lowshelf";
   eq.frequency.setValueAtTime(180, now);
   eq.gain.setValueAtTime(initialBassDb, now);
+  mid.type = "peaking";
+  mid.frequency.setValueAtTime(1000, now);
+  mid.Q.setValueAtTime(0.7, now);
+  mid.gain.setValueAtTime(0, now);
+  hpf.type = "highpass";
+  hpf.frequency.setValueAtTime(10, now);
+  hpf.Q.setValueAtTime(1.1, now);
   treble.type = "highshelf";
   treble.frequency.setValueAtTime(3000, now);
   treble.gain.setValueAtTime(0, now);
@@ -1978,15 +1999,195 @@ function createLiveChannel(context, now, initialBassDb = 0) {
   delay.delayTime.setValueAtTime(0.18, now);
   feedback.gain.setValueAtTime(0.0001, now);
   delayWet.gain.setValueAtTime(0.0001, now);
-  eq.connect(treble);
-  treble.connect(filter);
+  eq.connect(mid);
+  mid.connect(treble);
+  treble.connect(hpf);
+  hpf.connect(filter);
   filter.connect(gain);
   gain.connect(liveSession?.master || context.destination);
   gain.connect(delay);
   delay.connect(feedback);
   feedback.connect(delay);
   delay.connect(delayWet).connect(liveSession?.master || context.destination);
-  return { eq, treble, filter, gain, delay, feedback, delayWet };
+  return { eq, mid, treble, hpf, filter, gain, delay, feedback, delayWet };
+}
+
+// ---- Automation lanes (deep moves) ------------------------------------------
+// The planner sends each deep transition as lanes; the WAV renderer performs the
+// same lanes in Python (automation_engine.py), so live and download match.
+
+const LANE_STEPS = 96;
+
+function sampleLane(points, param, steps = LANE_STEPS) {
+  const sorted = [...points].sort((a, b) => a[0] - b[0]);
+  const curve = new Float32Array(steps);
+  const logScale = param === "hpf" || param === "lpf";
+  for (let step = 0; step < steps; step += 1) {
+    const x = step / (steps - 1);
+    curve[step] = laneValueAt(sorted, x, param, logScale);
+  }
+  return curve;
+}
+
+function laneValueAt(sorted, x, param, logScale = param === "hpf" || param === "lpf") {
+  if (x <= sorted[0][0]) {
+    return param === "loop" && x < sorted[0][0] ? 0 : sorted[0][1];
+  }
+  for (let index = 1; index < sorted.length; index += 1) {
+    const [x1, y1] = sorted[index];
+    if (x <= x1) {
+      const [x0, y0] = sorted[index - 1];
+      if (param === "loop") {
+        return x === x1 ? y1 : y0;
+      }
+      const t = x1 > x0 ? (x - x0) / (x1 - x0) : 1;
+      return logScale
+        ? Math.exp(Math.log(Math.max(1, y0)) + (Math.log(Math.max(1, y1)) - Math.log(Math.max(1, y0))) * t)
+        : y0 + (y1 - y0) * t;
+    }
+  }
+  return sorted[sorted.length - 1][1];
+}
+
+function dbToGain(db) {
+  return 10 ** (db / 20);
+}
+
+function channelParam(channel, param) {
+  switch (param) {
+    case "gain":
+      return channel.gain.gain;
+    case "low":
+      return channel.eq.gain;
+    case "mid":
+      return channel.mid.gain;
+    case "high":
+      return channel.treble.gain;
+    case "hpf":
+      return channel.hpf.frequency;
+    case "lpf":
+      channel.filter.type = "lowpass";
+      return channel.filter.frequency;
+    default:
+      return null;
+  }
+}
+
+// Run every lane for both decks. Returns when the outgoing source can stop.
+function performAutomation(lanes, out, inChannel, start, duration, beatSeconds, beatInBuffer) {
+  const decks = { out: out.channel, in: inChannel };
+  let stopAt = start + duration + 0.05;
+  for (const lane of lanes) {
+    const channel = decks[lane.deck];
+    if (!channel || !lane.points?.length) {
+      continue;
+    }
+    if (lane.param === "echo") {
+      scheduleEchoLane(channel, lane.points, start, duration, beatSeconds);
+      continue;
+    }
+    if (lane.param === "rate" || lane.param === "loop") {
+      continue; // handled together below
+    }
+    const target = channelParam(channel, lane.param);
+    if (!target) {
+      continue;
+    }
+    const curve = sampleLane(lane.points, lane.param);
+    if (lane.param === "gain") {
+      for (let index = 0; index < curve.length; index += 1) {
+        curve[index] = Math.max(0.0001, curve[index]);
+      }
+    }
+    target.cancelScheduledValues(start);
+    target.setValueAtTime(curve[0], start);
+    target.setValueCurveAtTime(curve, start, Math.max(0.05, duration));
+  }
+
+  const rateLane = lanes.find((lane) => lane.deck === "out" && lane.param === "rate");
+  const loopLane = lanes.find((lane) => lane.deck === "out" && lane.param === "loop");
+  const rateCurve = rateLane ? sampleLane(rateLane.points, "rate").map((value) => value * out.rate) : null;
+  if (rateCurve && out.source?.playbackRate) {
+    out.source.playbackRate.cancelScheduledValues(start);
+    out.source.playbackRate.setValueAtTime(rateCurve[0], start);
+    out.source.playbackRate.setValueCurveAtTime(rateCurve, start, Math.max(0.05, duration));
+  }
+  if (loopLane && out.track?.buffer) {
+    const engaged = scheduleLoopLane(out, loopLane.points, rateLane?.points || null, start, duration, beatInBuffer);
+    if (engaged !== null) {
+      stopAt = engaged + 0.004;
+    }
+  }
+  return stopAt;
+}
+
+// Echo send: 3/4-beat delay; feedback rings on after the lane ends, then dies away.
+function scheduleEchoLane(channel, points, start, duration, beatSeconds) {
+  const send = sampleLane(points, "echo");
+  const wet = send.map((value) => Math.max(0.0001, value * 0.6));
+  const feedback = send.map((value) => Math.max(0.0001, Math.min(0.5, value * 0.9)));
+  channel.delay.delayTime.cancelScheduledValues(start);
+  channel.delay.delayTime.setValueAtTime(Math.min(1.1, beatSeconds * 0.75), start);
+  for (const [param, curve] of [
+    [channel.delayWet.gain, wet],
+    [channel.feedback.gain, feedback],
+  ]) {
+    param.cancelScheduledValues(start);
+    param.setValueAtTime(curve[0], start);
+    param.setValueCurveAtTime(curve, start, Math.max(0.05, duration));
+    param.setValueAtTime(curve[curve.length - 1], start + duration + 0.01);
+    param.exponentialRampToValueAtTime(0.0001, start + duration + 2.5);
+  }
+}
+
+// Loop lane: once the loop engages the outgoing song stays on a loop of the given
+// length (in beats), re-anchored at the same point, following the rate lane.
+function scheduleLoopLane(out, loopPoints, ratePoints, start, duration, beatInBuffer) {
+  const sorted = [...loopPoints].sort((a, b) => a[0] - b[0]);
+  const rateSorted = ratePoints ? [...ratePoints].sort((a, b) => a[0] - b[0]) : null;
+  const rateAt = (x) => (rateSorted ? laneValueAt(rateSorted, x, "rate") : 1) * out.rate;
+  const segments = [];
+  for (let index = 0; index < sorted.length; index += 1) {
+    const [x, beats] = sorted[index];
+    const next = index + 1 < sorted.length ? sorted[index + 1][0] : 1;
+    if (beats > 0 && next > x) {
+      segments.push({ from: x, to: next, beats });
+    }
+  }
+  if (!segments.length) {
+    return null;
+  }
+  // Where the playhead is when the loop engages (integrate the rate up to that point).
+  const engageX = segments[0].from;
+  let anchor = bufferPositionAt(start);
+  const integrationSteps = 32;
+  for (let step = 0; step < integrationSteps; step += 1) {
+    const x = (engageX * (step + 0.5)) / integrationSteps;
+    anchor += rateAt(x) * ((engageX * duration) / integrationSteps);
+  }
+  const { context } = liveSession;
+  const beatBuffer = beatInBuffer || 60 / (out.track.bpm || 120);
+  for (const segment of segments) {
+    const segStart = start + segment.from * duration;
+    const segEnd = start + segment.to * duration;
+    const loop = context.createBufferSource();
+    loop.buffer = out.track.buffer;
+    loop.loop = true;
+    loop.loopStart = anchor;
+    loop.loopEnd = Math.min(out.track.buffer.duration, anchor + Math.max(0.02, segment.beats * beatBuffer));
+    const steps = 24;
+    const rates = new Float32Array(steps);
+    for (let step = 0; step < steps; step += 1) {
+      rates[step] = rateAt(segment.from + ((segment.to - segment.from) * step) / (steps - 1));
+    }
+    loop.playbackRate.setValueAtTime(rates[0], segStart);
+    loop.playbackRate.setValueCurveAtTime(rates, segStart, Math.max(0.02, segEnd - segStart));
+    loop.connect(out.channel.eq);
+    loop.start(segStart, anchor);
+    loop.stop(segEnd + 0.003);
+    trackLiveSource(loop);
+  }
+  return start + engageX * duration;
 }
 
 // ---- Party moves -----------------------------------------------------------
@@ -2713,6 +2914,12 @@ function transitionTechniqueLabel(technique) {
     reverb_wash: "reverb wash",
     spinback: "spinback",
     power_down: "power-down",
+    double_play: "double play (both songs together)",
+    vocal_over: "vocal-over mashup",
+    filter_swap: "resonant filter swap",
+    loop_riser: "loop riser (repeat, speed up, switch)",
+    key_lift: "key-change lift",
+    beat_juggle: "beat juggle",
   }[technique] || "transition";
 }
 

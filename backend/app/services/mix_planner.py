@@ -9,13 +9,14 @@ from app.models.style_profile import DJStyleProfile
 from app.models.track import TrackAnalysis
 from app.services.compatibility import CompatibilityService, effective_tempo_ratio, key_score
 from app.services.song_research_service import recommend_play_window
+from app.services.transition_recipes import build_lanes
 from app.services.transition_selector import TECHNIQUES, TransitionHistory, choose_technique
 from app.services.vibe import energy_arc_target, energy_flow_fit
 
 # Arc weight vs. pair cost when ordering a set. Pair cost (1 - compatibility)
 # dominates so blends stay smooth; the arc only breaks ties toward a good flow.
 ARC_WEIGHT = 0.22
-SHORT_BLEND_CAP_SECONDS = 6.0
+SHORT_BLEND_CAP_SECONDS = 8.0
 LONG_BLEND_CAP_SECONDS = 16.0
 SAFE_TEMPO_RATIO = (0.94, 1.06)
 
@@ -209,6 +210,12 @@ class MixPlanner:
                         bass_swap_position=_bass_swap_position(technique),
                         incoming_entry_position=TECHNIQUES[technique].incoming_entry,
                         beat_seconds=round(60.0 / (track.bpm or 120.0), 4),
+                        automation=build_lanes(
+                            technique,
+                            round(transition_duration / (240.0 / (track.bpm or 120.0)), 3),
+                            effective_tempo_ratio(track.bpm, next_track.bpm),
+                            transition_duration,
+                        ),
                         compatibility_score=compatibility.compatibility_score,
                         sfx=effects,
                     )
@@ -393,6 +400,12 @@ def _loop_seconds(loop_beats: int, bpm: float | None) -> float:
 
 def _background_tail_seconds(technique: str, transition_duration: float) -> float:
     ratios = {
+        "double_play": 0.0,
+        "vocal_over": 0.0,
+        "filter_swap": 0.0,
+        "loop_riser": 0.0,
+        "key_lift": 0.0,
+        "beat_juggle": 0.0,
         "eq_blend": 0.7,
         "reverb_wash": 0.5,
         "roll_build": 0.0,
@@ -434,6 +447,12 @@ def _technique_effects(effects: list[str], technique: str, enabled: bool) -> lis
     if not enabled:
         return []
     additions = {
+        "double_play": [],
+        "vocal_over": [],
+        "filter_swap": [],
+        "loop_riser": ["reverb_riser"],
+        "key_lift": ["reverb_riser"],
+        "beat_juggle": [],
         "eq_blend": [],
         "reverb_wash": [],
         "roll_build": ["reverb_riser"],
@@ -450,6 +469,12 @@ def _technique_effects(effects: list[str], technique: str, enabled: bool) -> lis
         "quick_cut": ["echo_freeze", "brake_cut"],
     }.get(technique, [])
     allowed = {
+        "double_play": set(),
+        "vocal_over": set(),
+        "filter_swap": {"soft_sweep"},
+        "loop_riser": {"reverb_riser", "impact"},
+        "key_lift": {"reverb_riser", "impact"},
+        "beat_juggle": set(),
         "eq_blend": {"soft_sweep"},
         "reverb_wash": {"soft_sweep"},
         "roll_build": {"reverb_riser", "filter_sweep", "impact"},
@@ -484,12 +509,14 @@ def _transition_duration_seconds(
     if upper_limit <= 0:
         return 0.0
 
-    fixed_bars = TECHNIQUES[technique].fixed_bars if technique in TECHNIQUES else None
-    if fixed_bars:
-        # Moves that live on the last bar(s) of a phrase: exact bar length so the
-        # next song lands on the "1". Two-bar moves drop to one bar at slow tempos.
-        bars = fixed_bars if fixed_bars * bar_seconds <= 6.0 else max(1.0, fixed_bars / 2)
-        return round(min(bars * bar_seconds, upper_limit), 3)
+    bars = fixed_window_bars(technique, bpm)
+    if bars:
+        # Bar-exact window so the next song lands on the "1"; never longer than the
+        # songs allow (whole bars only).
+        fitting = bars
+        while fitting > 1 and fitting * bar_seconds > upper_limit:
+            fitting /= 2
+        return round(min(fitting * bar_seconds, upper_limit), 3)
 
     phrase_request = (
         style_profile.transition_duration_seconds
@@ -520,6 +547,18 @@ def _transition_duration_seconds(
     return round(_snap_to_grid(duration, bar_seconds, beat_seconds, minimum, upper_bound), 3)
 
 
+def fixed_window_bars(technique: str, bpm: float | None) -> float | None:
+    """Bars for moves with a fixed phrase length, halved until they fit the move's time limit."""
+    spec = TECHNIQUES.get(technique)
+    if not spec or not spec.fixed_bars:
+        return None
+    bar_seconds = 240.0 / (bpm or 120.0)
+    bars = spec.fixed_bars
+    while bars > 1 and bars * bar_seconds > spec.max_seconds:
+        bars /= 2
+    return bars
+
+
 def _long_blend_ok(
     source: MixableTrack,
     target: MixableTrack,
@@ -538,14 +577,15 @@ def _long_blend_pair_ok(
     compatibility_score: float,
     mix_direction: str | None,
 ) -> bool:
-    """Tempo and key are locked tightly enough for the two songs to ride together."""
-    if compatibility_score < 0.82:
+    """Tempo and key are close enough for the two songs to ride together (the incoming
+    song is time-stretched to the outgoing tempo, so a few percent is fine)."""
+    if compatibility_score < 0.78:
         return False
     if not source.bpm or not target.bpm:
         return False
-    if not 0.97 <= effective_tempo_ratio(source.bpm, target.bpm) <= 1.03:
+    if not 0.96 <= effective_tempo_ratio(source.bpm, target.bpm) <= 1.04:
         return False
-    if key_score(source.key, target.key) < 0.85:
+    if key_score(source.key, target.key) < 0.8:
         return False
     direction = (mix_direction or "").lower()
     return not any(word in direction for word in ("quick", "fast cut", "short blend", "hip hop", "rap"))

@@ -20,7 +20,7 @@ import math
 from dataclasses import dataclass
 
 from app.models.mix import MixableTrack
-from app.services.compatibility import effective_tempo_ratio, genre_score, key_score
+from app.services.compatibility import effective_tempo_ratio, genre_score, key_relation, key_score
 
 
 @dataclass(frozen=True)
@@ -33,6 +33,8 @@ class Technique:
     # Where (0..1 through the transition) the incoming song comes in at full level.
     # 0 means it fades in from the start; 1 means it slams in exactly on the next "1".
     incoming_entry: float = 0.0
+    # Longest the fixed-bar window may run; the bar count halves until it fits.
+    max_seconds: float = 6.0
 
 
 TECHNIQUES: dict[str, Technique] = {
@@ -50,6 +52,13 @@ TECHNIQUES: dict[str, Technique] = {
     "kill_cut": Technique("kill_cut", "hard", fixed_bars=1, incoming_entry=1.0),
     "spinback": Technique("spinback", "hard", gimmick=True, fixed_bars=1, incoming_entry=1.0),
     "power_down": Technique("power_down", "hard", gimmick=True, fixed_bars=1, incoming_entry=1.0),
+    # Deep moves (performed from automation lanes, see transition_recipes.py).
+    "double_play": Technique("double_play", "blend", fixed_bars=16, max_seconds=34.0),
+    "vocal_over": Technique("vocal_over", "blend", fixed_bars=8, max_seconds=20.0),
+    "filter_swap": Technique("filter_swap", "fx", fixed_bars=8, max_seconds=18.0),
+    "loop_riser": Technique("loop_riser", "hard", gimmick=True, fixed_bars=4, incoming_entry=1.0, max_seconds=10.0),
+    "key_lift": Technique("key_lift", "hard", gimmick=True, fixed_bars=4, incoming_entry=1.0, max_seconds=10.0),
+    "beat_juggle": Technique("beat_juggle", "hard", gimmick=True, fixed_bars=2, max_seconds=6.0),
 }
 
 SMOOTH_WORDS = ("smooth", "chill", "lounge", "ambient", "clean", "mellow", "deep", "long blend")
@@ -59,6 +68,12 @@ _VOCAL_GENRES = ("pop", "r&b", "soul", "hip-hop", "rap", "rock", "country", "afr
 
 # Explicit requests in the vibe text. Order matters: more specific phrases first.
 _DIRECTION_OVERRIDES: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("double play", "play together", "both songs", "long mix", "ride together"), "double_play"),
+    (("mashup", "mash up", "acapella", "vocal over", "vocals over"), "vocal_over"),
+    (("riser", "repeat and speed", "loop and speed"), "loop_riser"),
+    (("key change", "key lift", "pitch up"), "key_lift"),
+    (("juggle", "back and forth", "call and response", "wordplay"), "beat_juggle"),
+    (("filter swap", "filter sweep", "resonant"), "filter_swap"),
     (("quick cut", "hard cut", "scratch"), "quick_cut"),
     (("spinback", "spin back", "backspin", "rewind"), "spinback"),
     (("power down", "power-down", "brake", "vinyl stop", "turntable stop"), "power_down"),
@@ -93,6 +108,7 @@ class PairContext:
     smooth: bool
     party: bool
     long_blend_ok: bool
+    key_lift_ok: bool = False
 
 
 def pair_context(
@@ -127,17 +143,24 @@ def pair_context(
         smooth=any(word in direction for word in SMOOTH_WORDS),
         party=any(word in direction for word in PARTY_WORDS),
         long_blend_ok=long_blend_ok,
+        key_lift_ok=key_relation(source.key, target.key) in {"semitone_lift", "energy_boost"},
     )
 
 
 def direction_override(context: PairContext, mix_direction: str | None) -> str | None:
     direction = (mix_direction or "").lower()
+    # "repeat the song, speed it up, then switch" is the loop riser, not a tempo blend.
+    if any(word in direction for word in ("repeat", "loop")) and any(
+        word in direction for word in ("speed", "faster", "riser")
+    ):
+        return "loop_riser"
     if any(word in direction for word in _TEMPO_REQUEST_WORDS):
         return "tempo_handoff" if context.beatmatchable else "echo_fade"
     for words, technique in _DIRECTION_OVERRIDES:
         if any(word in direction for word in words):
-            if technique == "eq_blend" and not context.beatmatchable:
-                return "phrase_blend"
+            needs_beatmatch = technique in {"eq_blend", "double_play", "vocal_over", "beat_juggle"}
+            if needs_beatmatch and not context.beatmatchable:
+                return "phrase_blend" if technique != "beat_juggle" else "quick_cut"
             return technique
     return None
 
@@ -207,6 +230,39 @@ def suitability(technique: str, c: PairContext) -> float:
             return -math.inf
         slower = c.tempo_ratio < 0.94
         score = 0.3 + 0.28 * drop + 0.18 * slower + 0.1 * c.genre_change + 0.06 * closing - 0.4 * c.smooth
+    elif technique == "double_play":
+        # Both songs ride together for 16 bars: only when tempo and key are locked.
+        if not c.long_blend_ok:
+            return -math.inf
+        score = 0.98 + 0.12 * c.dance_pair - 0.3 * c.vocal_pair + 0.05 * c.smooth - 0.1 * (c.party and not c.dance_pair)
+    elif technique == "vocal_over":
+        if not c.beatmatchable or not c.key_ok or c.compatibility < 0.68:
+            return -math.inf
+        score = 0.5 + 0.3 * c.vocal_pair + 0.1 * c.party + 0.05 * c.tempo_locked - 0.1 * c.smooth
+    elif technique == "filter_swap":
+        if not c.beatmatchable:
+            return -math.inf
+        score = 0.58 + 0.12 * c.dance_pair + 0.12 * (not c.key_ok) + 0.05 * c.smooth - 0.1 * c.vocal_pair
+    elif technique == "loop_riser":
+        faster = c.tempo_ratio > 1.03
+        score = (
+            0.38
+            + 0.24 * faster
+            + 0.14 * c.genre_change
+            + 0.22 * lift
+            + 0.1 * peak
+            + 0.12 * c.party
+            - 0.35 * c.smooth
+            - 0.2 * warmup
+        )
+    elif technique == "key_lift":
+        if not c.key_lift_ok or c.energy_change < 0:
+            return -math.inf
+        score = 0.8 + 0.1 * lift + 0.05 * peak - 0.3 * c.smooth
+    elif technique == "beat_juggle":
+        if not c.beatmatchable or abs(c.tempo_ratio - 1.0) > 0.03 or not c.key_ok:
+            return -math.inf
+        score = 0.4 + 0.2 * c.party + 0.15 * c.hip_hop + 0.08 * c.vocal_pair - 0.4 * c.smooth
     else:
         return -math.inf
     return score

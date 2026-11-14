@@ -10,6 +10,7 @@ from scipy.signal import butter, fftconvolve, sosfilt
 
 from app.config import Settings
 from app.models.mix import MixPlan, MixTransition
+from app.services.automation_engine import render_automated_transition
 from app.services.job_service import JobService
 from app.services.track_service import TrackNotFoundError, TrackService
 
@@ -148,6 +149,9 @@ def _append_with_crossfade(
     if fade == 0:
         return np.concatenate([current, incoming])
 
+    if transition and transition.automation:
+        return _append_automated(current, incoming, fade, sample_rate, transition)
+
     outgoing = current[-fade:].copy()
     if transition:
         outgoing = _prepare_outgoing_transition(outgoing, sample_rate, transition)
@@ -169,6 +173,26 @@ def _append_with_crossfade(
             [name for name in transition.sfx if name not in outgoing_only],
         )
     return np.concatenate([current[:-fade], overlap, after])
+
+
+def _append_automated(
+    current: np.ndarray,
+    incoming: np.ndarray,
+    fade: int,
+    sample_rate: int,
+    transition: MixTransition,
+) -> np.ndarray:
+    overlap, spill = render_automated_transition(current[-fade:], incoming[:fade], sample_rate, transition)
+    after = incoming[fade:].copy()
+    count = min(len(spill), len(after))
+    after[:count] += spill[:count]
+    if transition.sfx:
+        slams_in = transition.incoming_entry_position >= 0.99
+        names = [name for name in transition.sfx if not (slams_in and name == "impact")]
+        overlap = _add_transition_sfx(overlap, sample_rate, names)
+        if slams_in and "impact" in transition.sfx:
+            after = _add_impact_at_start(after, sample_rate)
+    return np.concatenate([current[:-fade], overlap, _prevent_clipping(after)])
 
 
 def _prepare_outgoing_transition(

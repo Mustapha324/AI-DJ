@@ -25,6 +25,12 @@ TransitionTechnique = Literal[
     "reverb_wash",
     "spinback",
     "power_down",
+    "double_play",
+    "vocal_over",
+    "filter_swap",
+    "loop_riser",
+    "key_lift",
+    "beat_juggle",
 ]
 MixStatus = Literal["planned", "queued", "rendering", "completed", "failed"]
 OutputFormat = Literal["wav"]
@@ -86,6 +92,25 @@ class MixTrackPlacement(BaseModel):
     key: str
 
 
+AutomationDeck = Literal["out", "in"]
+AutomationParam = Literal["gain", "low", "mid", "high", "hpf", "lpf", "rate", "echo", "loop"]
+
+
+class AutomationLane(BaseModel):
+    """One automated control during a transition, shared by the WAV renderer and live deck.
+
+    ``points`` are ``[position, value]`` pairs; position runs 0..1 through the transition
+    and values are linearly interpolated (``loop`` holds each value until the next point).
+    Units: gain = linear (1 = unity); low/mid/high = dB; hpf/lpf = Hz; rate = playback
+    speed multiplier; echo = send 0..1 (3/4-beat delay); loop = loop length in beats
+    (0 = not looping; once a loop engages the outgoing song stays looped to the end).
+    """
+
+    deck: AutomationDeck
+    param: AutomationParam
+    points: list[tuple[float, float]] = Field(..., min_length=1, max_length=64)
+
+
 class MixTransition(BaseModel):
     source_track_id: str
     target_track_id: str
@@ -116,6 +141,10 @@ class MixTransition(BaseModel):
     )
     compatibility_score: float = Field(..., ge=0, le=1)
     sfx: list[str] = Field(default_factory=list)
+    automation: list[AutomationLane] = Field(
+        default_factory=list,
+        description="When present, the transition is performed entirely from these lanes.",
+    )
 
 
 class MixPlan(BaseModel):

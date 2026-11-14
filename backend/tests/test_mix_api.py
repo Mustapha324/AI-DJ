@@ -3,6 +3,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from app.services.transition_selector import TECHNIQUES
 from app.services.mix_planner import _adaptive_transition_target, _source_tempo_adjustment_percent
 from app.services.mix_renderer import _repeat_with_crossfade, _tempo_ramp_outgoing
 
@@ -118,16 +119,7 @@ def test_mix_plan_creation_and_transition_timing(client, synthetic_mp3_named_upl
         assert transition["target_transition_end"] > transition["target_transition_start"]
         assert transition["duration_seconds"] > 0
         assert transition["duration_seconds"] <= 6
-        assert transition["technique"] in {
-            "phrase_blend",
-            "echo_fade",
-            "filter_blend",
-            "bass_swap",
-            "loop_echo_out",
-            "drop_swap",
-            "quick_cut",
-            "tempo_handoff",
-        }
+        assert transition["technique"] in TECHNIQUES
         assert 0.15 <= transition["bass_swap_position"] <= 0.85
         assert transition["background_tail_seconds"] >= 0
         if transition["technique"] == "loop_echo_out":
