@@ -1,13 +1,22 @@
 from __future__ import annotations
 
 import math
+import time
 from datetime import datetime, timezone
 
 from app.models.mix import MixableTrack, MixPlan, MixPlanRequest, MixTrackPlacement, MixTransition
 from app.models.style_profile import DJStyleProfile
 from app.models.track import TrackAnalysis
-from app.services.compatibility import CompatibilityService
+from app.services.compatibility import CompatibilityService, effective_tempo_ratio, key_score
 from app.services.song_research_service import recommend_play_window
+from app.services.vibe import energy_arc_target, energy_flow_fit
+
+# Arc weight vs. pair cost when ordering a set. Pair cost (1 - compatibility)
+# dominates so blends stay smooth; the arc only breaks ties toward a good flow.
+ARC_WEIGHT = 0.22
+SHORT_BLEND_CAP_SECONDS = 6.0
+LONG_BLEND_CAP_SECONDS = 16.0
+SAFE_TEMPO_RATIO = (0.94, 1.06)
 
 
 class MixPlanningError(Exception):
@@ -38,11 +47,15 @@ class MixPlanner:
             raise MixPlanningError(f"Track(s) were not found: {', '.join(missing_ids)}.")
 
         ordered_ids = (
-            self._auto_order([analysis_by_id[track_id] for track_id in request.track_ids])
+            self._auto_order(
+                [analysis_by_id[track_id] for track_id in request.track_ids],
+                request.mix_direction,
+                locked=min(request.locked_track_count, len(request.track_ids)),
+            )
             if request.auto_order
             else request.track_ids
         )
-        tracks = [_to_mixable_track(analysis_by_id[track_id]) for track_id in ordered_ids]
+        tracks = [to_mixable_track(analysis_by_id[track_id]) for track_id in ordered_ids]
 
         target_seconds = request.target_duration_minutes * 60 if request.target_duration_minutes else None
         target_limit = (target_seconds / len(tracks)) if target_seconds else None
@@ -79,7 +92,7 @@ class MixPlanner:
                 analysis_by_id[source_track.track_id],
                 analysis_by_id[target_track.track_id],
             )
-            technique = _select_varied_transition_technique(
+            technique = select_transition_technique(
                 source_track,
                 target_track,
                 compatibility.compatibility_score,
@@ -212,26 +225,124 @@ class MixPlanner:
             created_at=datetime.now(timezone.utc),
         )
 
-    def _auto_order(self, analyses: list[TrackAnalysis]) -> list[str]:
-        remaining = sorted(analyses, key=lambda item: (item.estimated_bpm or 0.0, item.overall_rms_energy))
-        ordered = [remaining.pop(0)]
+    def _auto_order(
+        self,
+        analyses: list[TrackAnalysis],
+        mix_direction: str | None = None,
+        *,
+        locked: int = 0,
+    ) -> list[str]:
+        """Order songs for the smoothest set that also follows the requested energy arc.
 
-        while remaining:
-            source = ordered[-1]
-            best = max(
-                remaining,
-                key=lambda candidate: (
-                    self.compatibility_service.compare(source, candidate).compatibility_score,
-                    candidate.overall_rms_energy,
-                ),
-            )
-            ordered.append(best)
-            remaining.remove(best)
+        Builds a pair-cost matrix from compatibility and energy flow, seeds candidate
+        orders greedily from several starting songs, then polishes the best with
+        2-opt segment reversals and single-song moves. The first ``locked`` songs stay put.
+        """
+        count = len(analyses)
+        if locked >= count - 1:
+            return [item.track_id for item in analyses]
+        if count <= 2:
+            return [item.track_id for item in sorted(analyses, key=lambda item: item.overall_rms_energy)]
 
-        return [analysis.track_id for analysis in ordered]
+        pair_cost = [[0.0] * count for _ in range(count)]
+        for i, source in enumerate(analyses):
+            for j, target in enumerate(analyses):
+                if i == j:
+                    continue
+                compatibility = self.compatibility_service.compare(source, target).compatibility_score
+                flow = energy_flow_fit(source.overall_rms_energy, target.overall_rms_energy, mix_direction)
+                pair_cost[i][j] = (1.0 - compatibility) + (1.0 - flow) * 0.12
+
+        energy_rank = _energy_ranks([item.overall_rms_energy for item in analyses])
+        arc = [energy_arc_target(position / (count - 1), mix_direction) for position in range(count)]
+
+        def total_cost(order: list[int]) -> float:
+            transitions = sum(pair_cost[a][b] for a, b in zip(order, order[1:], strict=False))
+            shape = sum(abs(energy_rank[index] - arc[position]) for position, index in enumerate(order))
+            return transitions + ARC_WEIGHT * shape
+
+        if locked:
+            seeds = [list(range(locked))]
+        else:
+            by_fit = sorted(range(count), key=lambda index: abs(energy_rank[index] - arc[0]))
+            seeds = [[start] for start in by_fit[: min(count, 6)]]
+
+        best_order: list[int] | None = None
+        best_cost = math.inf
+        for seed in seeds:
+            order = list(seed)
+            remaining = set(range(count)) - set(seed)
+            while remaining:
+                position = len(order)
+                current = order[-1]
+                choice = min(
+                    remaining,
+                    key=lambda index: (
+                        pair_cost[current][index] + ARC_WEIGHT * abs(energy_rank[index] - arc[position]),
+                        index,
+                    ),
+                )
+                order.append(choice)
+                remaining.remove(choice)
+            cost = total_cost(order)
+            if cost < best_cost - 1e-9:
+                best_order, best_cost = order, cost
+
+        assert best_order is not None
+        best_order, best_cost = _polish_order(best_order, best_cost, total_cost, fixed_prefix=locked)
+        return [analyses[index].track_id for index in best_order]
 
 
-def _to_mixable_track(analysis: TrackAnalysis) -> MixableTrack:
+def _polish_order(
+    order,
+    cost,
+    total_cost,
+    *,
+    fixed_prefix: int = 0,
+    max_rounds: int = 12,
+    time_budget_seconds: float = 1.5,
+):
+    """Local search: reverse segments (2-opt) and move single songs while it helps.
+
+    Stops early on a time budget so very large queues never stall a live re-plan.
+    """
+    count = len(order)
+    deadline = time.monotonic() + time_budget_seconds
+    for _ in range(max_rounds):
+        if time.monotonic() > deadline:
+            break
+        improved = False
+        for i in range(fixed_prefix, count - 1):
+            for j in range(i + 1, count):
+                candidate = order[:i] + order[i : j + 1][::-1] + order[j + 1 :]
+                candidate_cost = total_cost(candidate)
+                if candidate_cost < cost - 1e-9:
+                    order, cost, improved = candidate, candidate_cost, True
+        for i in range(fixed_prefix, count):
+            for j in range(fixed_prefix, count):
+                if i == j:
+                    continue
+                candidate = order[:i] + order[i + 1 :]
+                candidate.insert(j, order[i])
+                candidate_cost = total_cost(candidate)
+                if candidate_cost < cost - 1e-9:
+                    order, cost, improved = candidate, candidate_cost, True
+        if not improved:
+            break
+    return order, cost
+
+
+def _energy_ranks(energies: list[float]) -> list[float]:
+    if len(energies) <= 1:
+        return [0.5 for _ in energies]
+    order = sorted(range(len(energies)), key=lambda index: (energies[index], index))
+    ranks = [0.0] * len(energies)
+    for rank, index in enumerate(order):
+        ranks[index] = rank / (len(energies) - 1)
+    return ranks
+
+
+def to_mixable_track(analysis: TrackAnalysis) -> MixableTrack:
     return MixableTrack(
         track_id=analysis.track_id,
         file_name=analysis.file_name,
@@ -247,16 +358,7 @@ def _to_mixable_track(analysis: TrackAnalysis) -> MixableTrack:
     )
 
 
-def _transition_technique(
-    source: MixableTrack,
-    target: MixableTrack,
-    compatibility_score: float,
-    mix_direction: str | None,
-) -> str:
-    return _transition_candidates(source, target, compatibility_score, mix_direction)[0]
-
-
-def _select_varied_transition_technique(
+def select_transition_technique(
     source: MixableTrack,
     target: MixableTrack,
     compatibility_score: float,
@@ -282,12 +384,9 @@ def _transition_candidates(
     mix_direction: str | None,
 ) -> list[str]:
     direction = (mix_direction or "").lower()
-    tempo_delta = abs((source.bpm or 0.0) - (target.bpm or 0.0)) if source.bpm and target.bpm else 0.0
-    energy_delta = abs(source.overall_energy - target.overall_energy) / max(
-        source.overall_energy,
-        target.overall_energy,
-        1e-9,
-    )
+    tempo_ratio = effective_tempo_ratio(source.bpm, target.bpm)
+    tempo_delta = abs(tempo_ratio - 1.0) * (source.bpm or 120.0) if source.bpm and target.bpm else 0.0
+    energy_delta = _energy_delta(source, target)
     source_genre = source.genre.lower()
     target_genre = target.genre.lower()
     dance_words = ("house", "techno", "trance", "dance", "electronic", "drum & bass", "dubstep")
@@ -298,8 +397,7 @@ def _transition_candidates(
     vocal_pair = any(word in source_genre for word in vocal_words) or any(
         word in target_genre for word in vocal_words
     )
-    tempo_ratio = (target.bpm / source.bpm) if source.bpm and target.bpm else 1.0
-    tempo_handoff_safe = 0.94 <= tempo_ratio <= 1.06
+    tempo_handoff_safe = SAFE_TEMPO_RATIO[0] <= tempo_ratio <= SAFE_TEMPO_RATIO[1]
 
     if any(word in direction for word in ("quick", "hard cut", "scratch")):
         return ["quick_cut"]
@@ -411,33 +509,72 @@ def _transition_duration_seconds(
     mix_direction: str | None = None,
 ) -> float:
     bpm = source.bpm or target.bpm or 120.0
+    beat_seconds = 60.0 / bpm
+    bar_seconds = 4.0 * beat_seconds
     phrase_request = (
         style_profile.transition_duration_seconds
         if style_profile
-        else transition_bars * 4 * (60.0 / bpm)
+        else transition_bars * bar_seconds
     )
-    tempo_delta = abs((source.bpm or bpm) - (target.bpm or bpm))
-    energy_delta = abs(source.overall_energy - target.overall_energy) / max(
-        source.overall_energy,
-        target.overall_energy,
-        1e-9,
-    )
+    tempo_delta = abs(effective_tempo_ratio(source.bpm, target.bpm) - 1.0) * bpm
     adaptive_target = _adaptive_transition_target(
         compatibility_score,
         tempo_delta,
-        energy_delta,
+        _energy_delta(source, target),
         technique,
         mix_direction,
     )
     requested = (phrase_request * 0.28) + (adaptive_target * 0.72)
-    bar_seconds = 4.0 * (60.0 / bpm)
-    if bar_seconds > 0:
-        requested = round(requested / bar_seconds) * bar_seconds
-    upper_bound = min(source.duration_seconds * 0.4, target.duration_seconds * 0.4, 6.0)
+
+    cap = SHORT_BLEND_CAP_SECONDS
+    if _long_blend_ok(source, target, compatibility_score, technique, mix_direction):
+        # Locked tempo and key: let the songs ride together like a real DJ blend
+        # (8 bars when it fits, otherwise 4) instead of a short crossfade.
+        cap = LONG_BLEND_CAP_SECONDS
+        long_target = 8 * bar_seconds if 8 * bar_seconds <= cap else 4 * bar_seconds
+        requested = max(requested, long_target)
+
+    upper_bound = min(source.duration_seconds * 0.4, target.duration_seconds * 0.4, cap)
     if upper_bound <= 0:
         return 0.0
     minimum = min(2.5 if technique == "quick_cut" else 3.5, upper_bound)
-    return round(max(min(requested, upper_bound), minimum), 3)
+    duration = max(min(requested, upper_bound), minimum)
+    return round(_snap_to_grid(duration, bar_seconds, beat_seconds, minimum, upper_bound), 3)
+
+
+def _long_blend_ok(
+    source: MixableTrack,
+    target: MixableTrack,
+    compatibility_score: float,
+    technique: str,
+    mix_direction: str | None,
+) -> bool:
+    if technique not in {"phrase_blend", "bass_swap", "filter_blend"} or compatibility_score < 0.82:
+        return False
+    if not source.bpm or not target.bpm:
+        return False
+    if not 0.97 <= effective_tempo_ratio(source.bpm, target.bpm) <= 1.03:
+        return False
+    if key_score(source.key, target.key) < 0.85:
+        return False
+    direction = (mix_direction or "").lower()
+    return not any(word in direction for word in ("quick", "fast cut", "short blend", "hip hop", "rap"))
+
+
+def _snap_to_grid(duration: float, bar_seconds: float, beat_seconds: float, minimum: float, maximum: float) -> float:
+    """Snap a blend length to whole bars (or whole beats) so it starts and ends on the grid."""
+    for unit in (bar_seconds, beat_seconds):
+        if unit <= 0:
+            continue
+        options = [math.floor(duration / unit) * unit, math.ceil(duration / unit) * unit]
+        valid = [value for value in options if minimum - 1e-6 <= value <= maximum + 1e-6 and value > 0]
+        if valid:
+            return min(valid, key=lambda value: abs(value - duration))
+    return duration
+
+
+def _energy_delta(source: MixableTrack, target: MixableTrack) -> float:
+    return abs(source.overall_energy - target.overall_energy) / max(source.overall_energy, target.overall_energy, 1e-9)
 
 
 def _adaptive_transition_target(
@@ -515,8 +652,8 @@ def _sfx_for_transition(
     direction_effects = _direction_effect_palette(mix_direction)
     palette = _unique_effects([*profile_effects, *direction_effects])
     intensity = style_profile.effect_intensity if style_profile else 0.56
-    energy_delta = abs(source.overall_energy - target.overall_energy) / max(source.overall_energy, target.overall_energy, 1e-9)
-    tempo_delta = abs((source.bpm or 0.0) - (target.bpm or 0.0)) if source.bpm and target.bpm else 0.0
+    energy_delta = _energy_delta(source, target)
+    tempo_delta = abs(effective_tempo_ratio(source.bpm, target.bpm) - 1.0) * (source.bpm or 120.0)
 
     effects: list[str] = []
     direction = (mix_direction or "").lower()
@@ -715,19 +852,21 @@ def _energy_drop_after(track: MixableTrack, time_seconds: float, duration_second
 
 
 def _bpm_adjustment_percent(source_bpm: float | None, target_bpm: float | None) -> float:
+    """Stretch for the incoming song so it plays at the outgoing song's tempo."""
     if not source_bpm or not target_bpm:
         return 0.0
-    ratio = source_bpm / target_bpm
-    if 0.94 <= ratio <= 1.06:
-        return round((ratio - 1.0) * 100.0, 3)
-    return 0.0
+    return _safe_tempo_percent(1.0 / effective_tempo_ratio(source_bpm, target_bpm))
 
 
 def _source_tempo_adjustment_percent(source_bpm: float | None, target_bpm: float | None) -> float:
+    """Speed change for the outgoing song so it arrives at the incoming song's tempo."""
     if not source_bpm or not target_bpm:
         return 0.0
-    ratio = target_bpm / source_bpm
-    if 0.94 <= ratio <= 1.06:
+    return _safe_tempo_percent(effective_tempo_ratio(source_bpm, target_bpm))
+
+
+def _safe_tempo_percent(ratio: float) -> float:
+    if SAFE_TEMPO_RATIO[0] <= ratio <= SAFE_TEMPO_RATIO[1]:
         return round((ratio - 1.0) * 100.0, 3)
     return 0.0
 

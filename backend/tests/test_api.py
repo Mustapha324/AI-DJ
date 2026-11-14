@@ -16,7 +16,9 @@ def test_party_mode_page_loads(client):
     assert "Studio Mode" in response.text
     assert 'class="turntable-visual"' in response.text
     assert 'id="genreFilter"' in response.text
-    assert 'id="transitionSeconds" type="number" min="2" max="12" step="1" value="6"' in response.text
+    assert 'id="transitionSeconds" type="number" min="2" max="16" step="1" value="6"' in response.text
+    assert 'id="autoDj"' in response.text
+    assert 'id="recommendList"' in response.text
     assert "/docs" in response.text
 
 
@@ -220,7 +222,7 @@ def test_compatible_tracks_are_returned_in_score_order(client, synthetic_mp3_nam
     matches = response.json()
     assert len(matches) == 2
     assert matches[0]["compatibility_score"] >= matches[1]["compatibility_score"]
-    assert set(matches[0]["score_breakdown"]) == {"tempo", "key", "energy", "structure"}
+    assert set(matches[0]["score_breakdown"]) == {"tempo", "key", "energy", "structure", "genre"}
 
 
 def test_search_tracks_returns_saved_library_matches(client, synthetic_mp3_named_uploads):

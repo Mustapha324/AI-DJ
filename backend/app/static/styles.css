@@ -1023,6 +1023,36 @@ textarea {
   font-size: 0.75rem;
 }
 
+.recommend-score {
+  color: var(--accent);
+  font-size: 0.8rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.reason-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 5px;
+}
+
+.reason-tags span {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 1px 7px;
+  color: var(--muted);
+  font-size: 0.7rem;
+}
+
+.recommend-item {
+  grid-template-columns: 44px minmax(0, 1fr) auto;
+}
+
+.recommend-item.top {
+  border-color: rgba(56, 224, 193, 0.38);
+}
+
 .research-panel {
   display: grid;
   gap: 10px;
@@ -1212,6 +1242,10 @@ textarea {
 
   .queue-item {
     grid-template-columns: 24px minmax(0, 1fr);
+  }
+
+  .recommend-item {
+    grid-template-columns: 40px minmax(0, 1fr);
   }
 
   .queue-actions {

@@ -110,6 +110,11 @@
               <input id="useTrainedStyle" type="checkbox" checked />
               <i aria-hidden="true"></i>
             </label>
+            <label class="switch-option" title="When the queue runs out, the AI picks the best next song from your library">
+              <span>Auto DJ</span>
+              <input id="autoDj" type="checkbox" checked />
+              <i aria-hidden="true"></i>
+            </label>
           </div>
         </section>
 
@@ -135,7 +140,7 @@
             </label>
             <label class="small-field">
               <span>Blend seconds</span>
-              <input id="transitionSeconds" type="number" min="2" max="12" step="1" value="6" />
+              <input id="transitionSeconds" type="number" min="2" max="16" step="1" value="6" />
             </label>
           </div>
         </section>
@@ -223,6 +228,17 @@
             <span id="queueCount" class="pill">0 queued</span>
           </div>
           <ul id="queueList" class="queue-list"></ul>
+        </section>
+
+        <section class="list-panel recommend-panel" aria-labelledby="recommend-title">
+          <div class="section-head">
+            <div>
+              <p class="section-kicker">AI picks</p>
+              <h2 id="recommend-title">Recommended Next</h2>
+            </div>
+            <span id="recommendAnchor" class="pill">After your queue</span>
+          </div>
+          <ul id="recommendList" class="queue-list recommend-list"></ul>
         </section>
 
         <section class="workspace-grid">

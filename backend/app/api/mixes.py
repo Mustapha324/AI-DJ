@@ -9,12 +9,21 @@ from app.api.jobs import get_job_service
 from app.api.style_profiles import get_style_profile_service
 from app.api.tracks import get_track_service
 from app.config import settings
-from app.models.mix import MixPlan, MixPlanRequest, MixRecord, MixSummary, RenderMixRequest
+from app.models.mix import (
+    MixPlan,
+    MixPlanRequest,
+    MixRecord,
+    MixSummary,
+    NextTrackRecommendation,
+    NextTrackRequest,
+    RenderMixRequest,
+)
 from app.services.compatibility import CompatibilityService
 from app.services.job_service import JobService
 from app.services.mix_planner import MixPlanner, MixPlanningError
 from app.services.mix_renderer import MixRenderer, MixRenderError
 from app.services.mix_storage import MixNotFoundError, MixStorage
+from app.services.recommendation_service import RecommendationService
 from app.services.style_profile_service import StyleProfileService
 from app.services.track_service import TrackNotFoundError, TrackService
 
@@ -67,6 +76,19 @@ def create_mix_plan(
     except MixPlanningError as exc:
         job_service.update_job(job.job_id, status="failed", progress=100, message="Mix planning failed.", error=str(exc))
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
+@router.post("/recommend-next", response_model=list[NextTrackRecommendation])
+def recommend_next_tracks(
+    request: NextTrackRequest,
+    track_service: TrackService = Depends(get_track_service),
+) -> list[NextTrackRecommendation]:
+    """Rank saved songs that would mix well after the current song (used by Auto DJ)."""
+    try:
+        current = track_service.get_analysis(request.current_track_id)
+    except TrackNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    return RecommendationService().recommend_next(request, current, track_service.list_analyses())
 
 
 @router.post("/render", response_model=MixRecord, status_code=status.HTTP_201_CREATED)

@@ -140,6 +140,7 @@ class CompatibilityBreakdown(BaseModel):
     key: float = Field(..., ge=0, le=1)
     energy: float = Field(..., ge=0, le=1)
     structure: float = Field(..., ge=0, le=1)
+    genre: float = Field(default=0.65, ge=0, le=1)
 
 
 class TrackCompatibility(BaseModel):

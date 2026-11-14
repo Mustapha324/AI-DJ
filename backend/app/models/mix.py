@@ -48,6 +48,15 @@ class MixPlanRequest(BaseModel):
     mix_direction: str | None = Field(default=None, max_length=240)
     use_transition_sfx: bool = True
     use_trained_style: bool = True
+    locked_track_count: int = Field(
+        default=0,
+        ge=0,
+        le=500,
+        description=(
+            "Keep this many leading track IDs in place (for example the song playing live and a "
+            "song cued with Play Next) and let AI song order arrange only the rest."
+        ),
+    )
 
     @field_validator("mix_direction")
     @classmethod
@@ -147,3 +156,37 @@ class MixSummary(BaseModel):
     duration_seconds: float | None = None
     created_at: datetime
     updated_at: datetime
+
+
+class NextTrackRequest(BaseModel):
+    current_track_id: str = Field(..., min_length=1)
+    played_track_ids: list[str] = Field(default_factory=list, max_length=500)
+    queued_track_ids: list[str] = Field(default_factory=list, max_length=500)
+    mix_direction: str | None = Field(default=None, max_length=240)
+    limit: int = Field(default=5, ge=1, le=25)
+    include_queued: bool = False
+
+    @field_validator("mix_direction")
+    @classmethod
+    def clean_mix_direction(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = " ".join(value.split())
+        return cleaned or None
+
+
+class NextTrackRecommendation(BaseModel):
+    track_id: str
+    title: str
+    file_name: str
+    genre: str = "Open Format"
+    bpm: float | None = None
+    key: str
+    camelot: str | None = None
+    score: float = Field(..., ge=0, le=1)
+    compatibility_score: float = Field(..., ge=0, le=1)
+    energy_change_percent: float
+    key_relation: str
+    suggested_technique: TransitionTechnique
+    already_queued: bool = False
+    reasons: list[str] = Field(default_factory=list)

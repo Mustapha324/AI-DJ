@@ -30,6 +30,15 @@ let blendSecondsTouched = false;
 let appBusy = false;
 let mixBusy = false;
 let liveLineupUpdatePromise = Promise.resolve(false);
+let lastCatalogResults = [];
+let recommendTimer = null;
+let recommendRequestId = 0;
+let autoPickPending = false;
+
+// Blend timing limits (seconds). Planned blends for locked tempo+key pairs can ride
+// up to 16 s; manual blend input is capped the same way.
+const MAX_BLEND_SECONDS = 16;
+const SAFE_TEMPO_RATIO = [0.94, 1.06];
 
 const els = {
   dropZone: document.getElementById("dropZone"),
@@ -60,6 +69,9 @@ const els = {
   autoOrder: document.getElementById("autoOrder"),
   useSfx: document.getElementById("useSfx"),
   useTrainedStyle: document.getElementById("useTrainedStyle"),
+  autoDj: document.getElementById("autoDj"),
+  recommendList: document.getElementById("recommendList"),
+  recommendAnchor: document.getElementById("recommendAnchor"),
   targetMinutes: document.getElementById("targetMinutes"),
   playSeconds: document.getElementById("playSeconds"),
   transitionSeconds: document.getElementById("transitionSeconds"),
@@ -136,6 +148,13 @@ els.timingManual.addEventListener("change", updateTimingMode);
 els.playSeconds.addEventListener("input", updateTimingMode);
 els.transitionSeconds.addEventListener("input", () => {
   blendSecondsTouched = true;
+});
+els.mixDirection.addEventListener("input", scheduleRecommendations);
+els.autoDj.addEventListener("change", () => {
+  updateDeckDisplay();
+  if (els.autoDj.checked) {
+    maybeAutoPick();
+  }
 });
 els.useTrainedStyle.addEventListener("change", () => {
   if (els.useTrainedStyle.checked) {
@@ -365,6 +384,7 @@ async function loadInitialLibrary() {
 }
 
 function renderCatalogResults(results) {
+  lastCatalogResults = results;
   els.catalogResults.innerHTML = "";
   if (!results.length) {
     const item = document.createElement("li");
@@ -542,13 +562,7 @@ function updateStyleStatus(profile) {
 function addLibraryTrack(track, catalogResults) {
   const alreadyQueued = liveQueue.some((queued) => queued.id === `track:${track.track_id}`);
   selectedLibraryTracks.set(track.track_id, track);
-  ensureQueueItem({
-    id: `track:${track.track_id}`,
-    type: "track",
-    trackId: track.track_id,
-    name: track.title || track.file_name,
-    meta: formatTrackMeta(track),
-  });
+  ensureQueueItem(queueItemForTrack(track));
   renderTracks();
   renderQueue();
   renderCatalogResults(catalogResults);
@@ -594,13 +608,7 @@ async function importAudioUrl() {
     selectedLibraryTracks.set(track.track_id, track);
     analyzedTracks.set(track.track_id, track);
     updateGenreOptions([track]);
-    ensureQueueItem({
-      id: `track:${track.track_id}`,
-      type: "track",
-      trackId: track.track_id,
-      name: track.title || track.file_name,
-      meta: formatTrackMeta(track),
-    });
+    ensureQueueItem(queueItemForTrack(track));
     els.audioUrlInput.value = "";
     renderTracks();
     renderQueue();
@@ -825,6 +833,7 @@ function renderQueue() {
   if (!liveQueue.length) {
     els.queueList.appendChild(emptyItem("Drop tracks or add saved songs to build the live queue."));
     updateDeckDisplay();
+    scheduleRecommendations();
     return;
   }
 
@@ -854,6 +863,7 @@ function renderQueue() {
     els.queueList.appendChild(row);
   }
   updateDeckDisplay();
+  scheduleRecommendations();
 }
 
 function updateDeckDisplay() {
@@ -869,7 +879,7 @@ function updateDeckDisplay() {
     liveQueue.length ? `${liveQueue.length} songs lined up` : "Add at least two songs to start a live mix"
   );
   els.upNextTitle.textContent = next?.name || "Waiting for your queue";
-  els.upNextMeta.textContent = next?.meta || "AI will line up the set";
+  els.upNextMeta.textContent = next?.meta || (els.autoDj.checked ? "Auto DJ will pick from your library" : "AI will line up the set");
 }
 
 function handleQueueDragStart(event) {
@@ -906,6 +916,9 @@ function moveQueueItemBefore(itemId, targetId) {
   liveQueue.splice(adjustedIndex, 0, item);
   syncLiveDecodedOrder();
   renderQueue();
+  if (liveSession?.playing) {
+    scheduleLiveLineupUpdate("Queue reordered", { keepOrder: true }).catch(() => {});
+  }
 }
 
 function cueQueueItemNext(itemId) {
@@ -920,6 +933,9 @@ function cueQueueItemNext(itemId) {
   syncLiveDecodedOrder();
   renderQueue();
   setStatus("Next song cued", liveSession?.playing ? 48 : 24);
+  if (liveSession?.playing) {
+    scheduleLiveLineupUpdate("Next song cued", { pinnedNextId: item.id }).catch(() => {});
+  }
 }
 
 function removeQueueItem(itemId) {
@@ -952,17 +968,21 @@ function syncLiveDecodedOrder() {
   liveSession.currentIndex = current ? ordered.findIndex((item) => item.queueId === current.queueId) : -1;
 }
 
-function scheduleLiveLineupUpdate(reason = "Lineup changed") {
+function scheduleLiveLineupUpdate(reason = "Lineup changed", options = {}) {
   if (!liveSession?.playing) {
     return Promise.resolve(false);
   }
   liveLineupUpdatePromise = liveLineupUpdatePromise
     .catch(() => false)
-    .then(() => refreshLiveLineup(reason));
+    .then(() => refreshLiveLineup(reason, options));
   return liveLineupUpdatePromise;
 }
 
-async function refreshLiveLineup(reason) {
+// Decode any newly queued songs and re-plan everything after the playing song.
+// The playing song is always sent first and locked, so the plan includes the
+// transition out of it. options.pinnedNextId keeps a Play Next pick next;
+// options.keepOrder follows the queue exactly (after a manual drag).
+async function refreshLiveLineup(reason, options = {}) {
   const session = liveSession;
   if (!session?.playing || !session.currentItemId) {
     return false;
@@ -986,45 +1006,53 @@ async function refreshLiveLineup(reason) {
       continue;
     }
     setStatus(`Preparing ${item.name} - music keeps playing`, 54);
-    const arrayBuffer = await source.loadArrayBuffer();
-    if (liveSession !== session || !session.playing) {
-      return false;
+    let buffer;
+    let analysis;
+    try {
+      const arrayBuffer = await source.loadArrayBuffer();
+      if (liveSession !== session || !session.playing) {
+        return false;
+      }
+      buffer = await session.context.decodeAudioData(arrayBuffer.slice(0));
+      analysis = await fullAnalysis(item.trackId);
+    } catch (error) {
+      // One bad file should not stall the party: drop it and keep going.
+      const index = liveQueue.findIndex((queued) => queued.id === item.id);
+      if (index >= 0) {
+        liveQueue.splice(index, 1);
+      }
+      showErrors([{ file_name: item.name, error: error.message || "Could not load this song for the live deck." }]);
+      continue;
     }
-    const buffer = await session.context.decodeAudioData(arrayBuffer.slice(0));
-    const analysis =
-      selectedLibraryTracks.get(item.trackId) ||
-      analyzedTracks.get(item.trackId) ||
-      (item.trackId ? await fetchTrack(item.trackId) : null);
-    if (analysis) {
-      selectedLibraryTracks.set(analysis.track_id, analysis);
-      analyzedTracks.set(analysis.track_id, analysis);
-    }
-    decodedByQueueId.set(item.id, {
-      queueId: item.id,
-      trackId: item.trackId,
-      name: item.name,
-      bpm: analysis?.estimated_bpm || item.bpm || null,
-      keyName: analysis?.key?.display_name || item.keyName || null,
-      buffer,
-      startOffset: 0,
-      plannedWindow: null,
-    });
+    decodedByQueueId.set(item.id, decodedDeckTrack(item, buffer, analysis, null));
   }
 
   if (liveSession !== session || !session.playing) {
     return false;
   }
 
-  const pendingTrackIds = unique(pendingItems.map((item) => item.trackId));
+  const decodedPending = pendingItems.filter((item) => decodedByQueueId.has(item.id));
+  const pinnedItem = decodedPending.find((item) => item.id === options.pinnedNextId) || null;
+  const pendingTrackIds = unique([
+    pinnedItem?.trackId,
+    ...decodedPending.map((item) => item.trackId),
+  ]);
+  const currentTrackId = decodedByQueueId.get(initialCurrentId)?.trackId || null;
   let updatedPlan = null;
   let orderedTrackIds = pendingTrackIds;
-  if (pendingTrackIds.length >= 2) {
+  const planTrackIds = unique([currentTrackId, ...pendingTrackIds]);
+  if (currentTrackId && planTrackIds.length >= 2) {
     setStatus("AI updating what plays next - current song stays live", 62);
-    updatedPlan = await createPlan(pendingTrackIds, {
-      autoOrder: els.autoOrder.checked,
-      mixNamePrefix: "Party Lineup",
-    });
-    orderedTrackIds = updatedPlan.track_order || pendingTrackIds;
+    try {
+      updatedPlan = await createPlan(planTrackIds, {
+        autoOrder: els.autoOrder.checked && !options.keepOrder,
+        lockedTrackCount: pinnedItem?.trackId ? 2 : 1,
+        mixNamePrefix: "Party Lineup",
+      });
+      orderedTrackIds = (updatedPlan.track_order || planTrackIds).filter((trackId) => trackId !== currentTrackId);
+    } catch (error) {
+      console.warn("Live re-plan failed; keeping the queue order.", error);
+    }
   }
 
   if (liveSession !== session || !session.playing) {
@@ -1057,12 +1085,7 @@ async function refreshLiveLineup(reason) {
 
   if (updatedPlan) {
     for (const track of decodedFuture) {
-      const placement = plannedPlacementForTrack(updatedPlan, track.trackId);
-      track.startOffset = placement?.source_start_time || 0;
-      track.plannedWindow =
-        placement && placement.source_end_time > placement.source_start_time
-          ? placement.source_end_time - placement.source_start_time
-          : null;
+      applyPlacementToDeckTrack(track, plannedPlacementForTrack(updatedPlan, track.trackId));
     }
     session.plan = updatedPlan;
     applyPlanToLiveControls(updatedPlan);
@@ -1085,6 +1108,43 @@ async function refreshLiveLineup(reason) {
   renderQueue();
   setStatus(`${reason} - music kept playing`, 68);
   return true;
+}
+
+async function fullAnalysis(trackId) {
+  if (!trackId) {
+    return null;
+  }
+  const cached = analyzedTracks.get(trackId) || selectedLibraryTracks.get(trackId);
+  // Search results are summaries; the live deck needs the beat grid.
+  const analysis = cached?.beats ? cached : await fetchTrack(trackId);
+  selectedLibraryTracks.set(analysis.track_id, analysis);
+  analyzedTracks.set(analysis.track_id, analysis);
+  return analysis;
+}
+
+function decodedDeckTrack(item, buffer, analysis, placement) {
+  const track = {
+    queueId: item.queueId || item.id,
+    trackId: item.trackId,
+    name: item.name,
+    bpm: analysis?.estimated_bpm || item.bpm || null,
+    keyName: analysis?.key?.display_name || item.keyName || null,
+    bars: (analysis?.beats?.approximate_bars || []).map((bar) => bar.start_time),
+    beats: analysis?.beats?.beat_timestamps || [],
+    buffer,
+    startOffset: 0,
+    plannedWindow: null,
+  };
+  applyPlacementToDeckTrack(track, placement);
+  return track;
+}
+
+function applyPlacementToDeckTrack(track, placement) {
+  track.startOffset = placement?.source_start_time || 0;
+  track.plannedWindow =
+    placement && placement.source_end_time > placement.source_start_time
+      ? placement.source_end_time - placement.source_start_time
+      : null;
 }
 
 function uniqueQueueItems(items) {
@@ -1111,6 +1171,164 @@ function selectedTrackSummaries() {
     combined.set(trackId, track);
   }
   return Array.from(combined.values());
+}
+
+// ---- Recommended next songs & Auto DJ -------------------------------------
+
+function recommendationAnchor() {
+  if (liveSession?.playing) {
+    const current = liveSession.decodedQueue[liveSession.currentIndex];
+    if (current?.trackId) {
+      return { trackId: current.trackId, label: `After ${current.name}` };
+    }
+  }
+  const last = [...liveQueue].reverse().find((item) => item.trackId);
+  return last ? { trackId: last.trackId, label: `After ${last.name}` } : null;
+}
+
+function playedTrackIds() {
+  if (!liveSession?.decodedQueue?.length) {
+    return [];
+  }
+  return unique(liveSession.decodedQueue.slice(0, Math.max(0, liveSession.currentIndex)).map((track) => track.trackId));
+}
+
+async function fetchRecommendations(currentTrackId, limit = 5) {
+  return fetchJson("/api/mixes/recommend-next", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      current_track_id: currentTrackId,
+      played_track_ids: playedTrackIds(),
+      queued_track_ids: unique(liveQueue.map((item) => item.trackId)),
+      mix_direction: els.mixDirection.value.trim() || null,
+      limit,
+    }),
+  });
+}
+
+function scheduleRecommendations() {
+  window.clearTimeout(recommendTimer);
+  recommendTimer = window.setTimeout(() => {
+    refreshRecommendations().catch(() => {});
+  }, 350);
+}
+
+async function refreshRecommendations() {
+  const requestId = ++recommendRequestId;
+  const anchor = recommendationAnchor();
+  if (!anchor) {
+    els.recommendAnchor.textContent = "After your queue";
+    renderRecommendations([], "Queue an analyzed song and the AI will suggest what mixes best after it.");
+    return;
+  }
+  els.recommendAnchor.textContent = anchor.label;
+  try {
+    const picks = await fetchRecommendations(anchor.trackId, 5);
+    if (requestId === recommendRequestId) {
+      renderRecommendations(picks, "No other saved songs to suggest yet - add more to the library.");
+    }
+  } catch {
+    if (requestId === recommendRequestId) {
+      renderRecommendations([], "Suggestions are unavailable right now.");
+    }
+  }
+}
+
+function renderRecommendations(picks, emptyText) {
+  els.recommendList.innerHTML = "";
+  if (!picks.length) {
+    els.recommendList.appendChild(emptyItem(emptyText));
+    return;
+  }
+  for (const [index, pick] of picks.entries()) {
+    const row = document.createElement("li");
+    row.className = `queue-item recommend-item${index === 0 ? " top" : ""}`;
+    const keyText = pick.camelot ? `${pick.key} (${pick.camelot})` : pick.key;
+    row.innerHTML = `
+      <span class="recommend-score">${Math.round(pick.score * 100)}%</span>
+      <div>
+        <strong>${escapeHtml(pick.title || pick.file_name)}</strong>
+        <div class="queue-meta">${escapeHtml(pick.genre)} - ${formatBpm(pick.bpm)} - ${escapeHtml(keyText)} - ${escapeHtml(
+          transitionTechniqueLabel(pick.suggested_technique),
+        )}</div>
+        <div class="reason-tags">${pick.reasons.map((reason) => `<span>${escapeHtml(reason)}</span>`).join("")}</div>
+      </div>
+      <div class="queue-actions">
+        <button type="button" data-action="next">Play Next</button>
+        <button type="button" data-action="add">Add</button>
+      </div>
+    `;
+    row.querySelector('[data-action="next"]').addEventListener("click", () => addRecommendedTrack(pick, true));
+    row.querySelector('[data-action="add"]').addEventListener("click", () => addRecommendedTrack(pick, false));
+    els.recommendList.appendChild(row);
+  }
+}
+
+async function addRecommendedTrack(pick, playNext) {
+  try {
+    const track = await fetchTrack(pick.track_id);
+    if (playNext) {
+      // Add quietly, then cue: cueing triggers one live re-plan with the pick pinned next.
+      selectedLibraryTracks.set(track.track_id, track);
+      ensureQueueItem(queueItemForTrack(track));
+      renderTracks();
+      cueQueueItemNext(`track:${track.track_id}`);
+      return;
+    }
+    addLibraryTrack(track, lastCatalogResults);
+  } catch (error) {
+    showErrors([{ file_name: pick.title || "Recommendation", error: error.message || "Could not add this song." }]);
+  }
+}
+
+function queueItemForTrack(track) {
+  return {
+    id: `track:${track.track_id}`,
+    type: "track",
+    trackId: track.track_id,
+    name: track.title || track.file_name,
+    meta: formatTrackMeta(track),
+  };
+}
+
+// Auto DJ: once the playing song is the last one queued, add the best match
+// from the library so the set keeps going without a gap.
+async function maybeAutoPick() {
+  const session = liveSession;
+  if (!session?.playing || !els.autoDj.checked || autoPickPending) {
+    return;
+  }
+  const currentIndex = liveQueue.findIndex((item) => item.id === session.currentItemId);
+  const upcoming = currentIndex >= 0 ? liveQueue.length - currentIndex - 1 : 0;
+  const current = session.decodedQueue[session.currentIndex];
+  if (upcoming > 0 || !current?.trackId) {
+    return;
+  }
+
+  autoPickPending = true;
+  try {
+    const picks = await fetchRecommendations(current.trackId, 3);
+    const pick = picks.find((candidate) => !liveQueue.some((item) => item.trackId === candidate.track_id));
+    if (!pick || liveSession !== session || !session.playing) {
+      if (!pick && liveSession === session) {
+        setStatus("Auto DJ has no new songs left - add more to keep going", 46);
+      }
+      return;
+    }
+    const track = await fullAnalysis(pick.track_id);
+    if (liveSession !== session || !session.playing) {
+      return;
+    }
+    ensureQueueItem(queueItemForTrack(track));
+    renderTracks();
+    renderQueue();
+    await scheduleLiveLineupUpdate(`Auto DJ picked ${track.title || track.file_name}`);
+  } catch (error) {
+    console.warn("Auto DJ could not pick a song.", error);
+  } finally {
+    autoPickPending = false;
+  }
 }
 
 async function makeMix({ live }) {
@@ -1282,9 +1500,7 @@ async function startBrowserLiveMix(queueItems, plan = null) {
     currentSource: null,
     currentGain: null,
     currentChannel: null,
-    currentStartedAt: null,
-    currentStartOffset: 0,
-    currentPlaybackRate: 1,
+    ratePlan: null,
     timers: [],
     activeSources: new Set(),
     playing: false,
@@ -1304,20 +1520,10 @@ async function startBrowserLiveMix(queueItems, plan = null) {
     setStatus(`Loading live track ${index + 1} of ${sources.length}`, 20 + index * 6);
     const arrayBuffer = await sources[index].loadArrayBuffer();
     const buffer = await context.decodeAudioData(arrayBuffer.slice(0));
-    const placement = plannedPlacementForTrack(plan, sources[index].trackId);
-    liveSession.decodedQueue.push({
-      queueId: sources[index].queueId,
-      trackId: sources[index].trackId,
-      name: sources[index].name,
-      bpm: sources[index].bpm,
-      keyName: sources[index].keyName,
-      buffer,
-      startOffset: placement?.source_start_time || 0,
-      plannedWindow:
-        placement && placement.source_end_time > placement.source_start_time
-          ? placement.source_end_time - placement.source_start_time
-          : null,
-    });
+    const analysis = sources[index].trackId ? await fullAnalysis(sources[index].trackId).catch(() => null) : null;
+    liveSession.decodedQueue.push(
+      decodedDeckTrack(sources[index], buffer, analysis, plannedPlacementForTrack(plan, sources[index].trackId)),
+    );
   }
 
   playLiveTrackAtIndex(0, 0.8);
@@ -1375,7 +1581,7 @@ function playLiveTrackAtIndex(index, fadeInSeconds) {
   const transitionSeconds = nextTrack ? transitionSecondsBetween(track, nextTrack) : liveSession.transitionSeconds;
   const duration = livePreTransitionWindow(track, transitionSeconds);
   const offset = liveTrackStartOffset(track);
-  const playbackDuration = livePlaybackDuration(track, duration, transitionSeconds, 1);
+  const playbackDuration = livePlaybackDuration(track);
   const source = context.createBufferSource();
   const channel = createLiveChannel(context, now);
 
@@ -1391,9 +1597,7 @@ function playLiveTrackAtIndex(index, fadeInSeconds) {
   liveSession.currentSource = source;
   liveSession.currentGain = channel.gain;
   liveSession.currentChannel = channel;
-  liveSession.currentStartedAt = now;
-  liveSession.currentStartOffset = offset;
-  liveSession.currentPlaybackRate = 1;
+  liveSession.ratePlan = { startedAt: now, offset, rate: 1, glideStart: null, glideEnd: null };
   liveSession.playing = true;
   liveSession.transitioning = false;
 
@@ -1407,12 +1611,27 @@ function playLiveTrackAtIndex(index, fadeInSeconds) {
   const autoMs = Math.max(1000, duration * 1000);
   liveSession.timers.push(window.setTimeout(() => transitionToNextTrack(false), autoMs));
   renderQueue();
+  maybeAutoPick();
 }
 
+// Start each song on a downbeat: snap the planned entry to the nearest bar line.
 function liveTrackStartOffset(track) {
   const requested = Number.isFinite(track.startOffset) ? track.startOffset : 0;
+  const barSeconds = 240 / (track.bpm || 120);
+  let offset = requested;
+  let bestDistance = Infinity;
+  for (const barStart of track.bars || []) {
+    const distance = Math.abs(barStart - requested);
+    if (distance <= barSeconds && distance < bestDistance) {
+      offset = barStart;
+      bestDistance = distance;
+    }
+    if (barStart > requested + barSeconds) {
+      break;
+    }
+  }
   const latest = Math.max(0, track.buffer.duration - 1);
-  return Math.max(0, Math.min(requested, latest));
+  return Math.max(0, Math.min(offset, latest));
 }
 
 function livePreTransitionWindow(track, transitionSeconds) {
@@ -1426,36 +1645,114 @@ function livePreTransitionWindow(track, transitionSeconds) {
   return Math.max(4, Math.min(preferred, Math.max(4, available - Math.min(transitionSeconds, available * 0.5))));
 }
 
-function livePlaybackDuration(track, preTransitionSeconds, transitionSeconds, playbackRate) {
-  const available = Math.max(0, track.buffer.duration - liveTrackStartOffset(track));
-  const requested = Math.max(1, preTransitionSeconds + transitionSeconds + 0.8) * Math.max(0.1, playbackRate);
-  return Math.min(available, requested);
+// Play the rest of the song; transitions stop the outgoing source explicitly.
+// If nothing is queued yet, the song simply keeps going instead of cutting out.
+function livePlaybackDuration(track) {
+  return Math.max(0.1, track.buffer.duration - liveTrackStartOffset(track));
+}
+
+function playbackRateAt(time) {
+  const plan = liveSession?.ratePlan;
+  if (!plan) {
+    return 1;
+  }
+  if (!plan.glideStart || time <= plan.glideStart) {
+    return plan.rate;
+  }
+  if (time >= plan.glideEnd) {
+    return 1;
+  }
+  return plan.rate + (1 - plan.rate) * ((time - plan.glideStart) / (plan.glideEnd - plan.glideStart));
+}
+
+// Where the playing song's playhead is (in song seconds) at a context time,
+// accounting for the post-blend glide back to its native tempo.
+function bufferPositionAt(time) {
+  const plan = liveSession?.ratePlan;
+  if (!plan) {
+    return 0;
+  }
+  const t = Math.max(plan.startedAt, time);
+  if (!plan.glideStart || t <= plan.glideStart) {
+    return plan.offset + (t - plan.startedAt) * plan.rate;
+  }
+  const glideLength = plan.glideEnd - plan.glideStart;
+  const inGlide = Math.min(t, plan.glideEnd) - plan.glideStart;
+  let position = plan.offset + (plan.glideStart - plan.startedAt) * plan.rate;
+  position += inGlide * plan.rate + ((1 - plan.rate) * inGlide * inGlide) / (2 * glideLength);
+  if (t > plan.glideEnd) {
+    position += t - plan.glideEnd;
+  }
+  return position;
+}
+
+// Seconds to wait so the blend starts on the outgoing song's next bar line.
+// Manual "Mix Next Now" falls back to the next beat when bar data is missing.
+function quantizedTransitionDelay(track, earliest) {
+  const bars = track?.bars || [];
+  const beats = track?.beats || [];
+  if (!bars.length && !beats.length) {
+    return 0;
+  }
+  const rate = Math.max(0.5, playbackRateAt(earliest));
+  const position = bufferPositionAt(earliest);
+  const barSeconds = 240 / (track.bpm || 120);
+  const nextBar = bars.find((time) => time >= position + 0.01);
+  if (nextBar !== undefined && nextBar - position <= barSeconds * 1.02) {
+    return (nextBar - position) / rate;
+  }
+  const nextBeat = beats.find((time) => time >= position + 0.01);
+  if (nextBeat !== undefined && nextBeat - position <= 1.5) {
+    return (nextBeat - position) / rate;
+  }
+  return 0;
+}
+
+function foldedTempoRatio(fromBpm, toBpm) {
+  if (!fromBpm || !toBpm) {
+    return 1;
+  }
+  return [toBpm / fromBpm, toBpm / 2 / fromBpm, (toBpm * 2) / fromBpm].reduce((best, ratio) =>
+    Math.abs(ratio - 1) < Math.abs(best - 1) ? ratio : best,
+  );
+}
+
+function isSafeTempoRatio(ratio) {
+  return ratio >= SAFE_TEMPO_RATIO[0] && ratio <= SAFE_TEMPO_RATIO[1];
 }
 
 function transitionToNextTrack(manual) {
-  if (!liveSession || liveSession.transitioning) {
+  if (!liveSession) {
+    return;
+  }
+  if (liveSession.transitioning) {
+    if (manual) {
+      setStatus("Still blending - the next mix is available when this blend lands", 50);
+    }
     return;
   }
 
   const nextIndex = liveSession.currentIndex + 1;
   if (nextIndex >= liveSession.decodedQueue.length) {
-    if (manual) {
-      setStatus("No next track queued", 45);
-    }
+    handleQueueRunningOut(manual);
     return;
   }
 
   clearLiveTimers();
   liveSession.transitioning = true;
   const { context } = liveSession;
-  const now = context.currentTime + 0.05;
   const nextTrack = liveSession.decodedQueue[nextIndex];
   const currentTrack = liveSession.decodedQueue[liveSession.currentIndex];
+  const earliest = context.currentTime + 0.05;
+  const downbeatDelay = quantizedTransitionDelay(currentTrack, earliest);
+  // "now" is when the blend starts: the outgoing song's next downbeat.
+  const now = earliest + downbeatDelay;
   const transition = transitionSecondsBetween(currentTrack, nextTrack);
   const plannedTransition = plannedTransitionBetween(currentTrack, nextTrack);
   const technique = plannedTransition?.technique || "phrase_blend";
   const transitionEffects = liveTransitionEffects(currentTrack, nextTrack);
-  const playbackRate = aiPlaybackRateForNext(nextTrack, technique);
+  const outgoingRate = playbackRateAt(now);
+  const playbackRate = aiPlaybackRateForNext(currentTrack, outgoingRate, nextTrack, technique);
   const nextOffset = liveTrackStartOffset(nextTrack);
   const nextWindow = livePreTransitionWindow(
     nextTrack,
@@ -1471,9 +1768,11 @@ function transitionToNextTrack(manual) {
   scheduleEqualPowerFade(nextChannel.gain.gain, now, transition, true, technique);
   const bassSwap = Math.max(0.25, Math.min(0.82, plannedTransition?.bass_swap_position || 0.58));
   scheduleBassHandoff(nextChannel.eq.gain, now, transition, bassSwap, true);
-  nextSource.start(now, nextOffset, livePlaybackDuration(nextTrack, nextWindow, transition, playbackRate));
+  nextSource.start(now, nextOffset, livePlaybackDuration(nextTrack));
+  const glide = scheduleTempoGlideHome(nextSource, nextTrack, playbackRate, now + transition);
   liveSession.activeSources.add(nextSource);
 
+  holdPlaybackRate(liveSession.currentSource, now, outgoingRate);
   if (liveSession.currentGain) {
     liveSession.currentGain.gain.cancelScheduledValues(now);
     scheduleEqualPowerFade(liveSession.currentGain.gain, now, transition, false, technique);
@@ -1483,7 +1782,7 @@ function transitionToNextTrack(manual) {
   }
   scheduleTempoHandoff(
     liveSession.currentSource,
-    Number(liveSession.currentPlaybackRate || 1),
+    outgoingRate,
     currentTrack,
     nextTrack,
     now,
@@ -1522,19 +1821,50 @@ function transitionToNextTrack(manual) {
   liveSession.currentSource = nextSource;
   liveSession.currentGain = nextChannel.gain;
   liveSession.currentChannel = nextChannel;
-  liveSession.currentStartedAt = now;
-  liveSession.currentStartOffset = nextOffset;
-  liveSession.currentPlaybackRate = playbackRate;
+  liveSession.ratePlan = {
+    startedAt: now,
+    offset: nextOffset,
+    rate: playbackRate,
+    glideStart: glide?.start ?? null,
+    glideEnd: glide?.end ?? null,
+  };
   liveSession.timers.push(
     window.setTimeout(() => {
       if (liveSession?.currentSource === nextSource) {
         liveSession.transitioning = false;
       }
-    }, transition * 1000 + 120),
+    }, (downbeatDelay + transition) * 1000 + 120),
   );
-  liveSession.timers.push(window.setTimeout(() => transitionToNextTrack(false), Math.max(1000, nextWindow * 1000)));
-  setStatus(`${manual ? "Manual" : "AI"} ${transitionTechniqueLabel(technique)} - ${transition.toFixed(1)} sec`, 52);
+  liveSession.timers.push(
+    window.setTimeout(() => transitionToNextTrack(false), Math.max(1000, (downbeatDelay + nextWindow) * 1000)),
+  );
+  const onBeat = downbeatDelay > 0 ? " on the downbeat" : "";
+  setStatus(`${manual ? "Manual" : "AI"} ${transitionTechniqueLabel(technique)}${onBeat} - ${transition.toFixed(1)} sec`, 52);
   renderQueue();
+  maybeAutoPick();
+}
+
+// Nothing left to blend into. With Auto DJ on, pick a song and retry while the
+// current one keeps playing; otherwise let it play out and end the set.
+function handleQueueRunningOut(manual) {
+  const session = liveSession;
+  const current = session?.decodedQueue?.[session.currentIndex];
+  const position = bufferPositionAt(session.context.currentTime);
+  const stillPlaying = current && position < current.buffer.duration - 0.25;
+  if (stillPlaying && (els.autoDj.checked || autoPickPending)) {
+    setStatus(manual ? "Auto DJ is finding the next song" : "Auto DJ picking the next song - music keeps playing", 46);
+    maybeAutoPick();
+    session.timers.push(window.setTimeout(() => transitionToNextTrack(false), 2000));
+    return;
+  }
+  if (stillPlaying) {
+    if (manual) {
+      setStatus("No next track queued - turn on Auto DJ or add a song", 45);
+    }
+    return;
+  }
+  stopLiveMix();
+  setStatus("Set complete", 100);
 }
 
 function plannedPlacementForTrack(plan, trackId) {
@@ -1560,30 +1890,54 @@ function transitionSecondsBetween(sourceTrack, targetTrack) {
   if (!blendSecondsTouched) {
     const planned = plannedTransitionBetween(sourceTrack, targetTrack);
     if (planned?.duration_seconds) {
-      return Math.max(2, Math.min(6, planned.duration_seconds));
+      return Math.max(2, Math.min(MAX_BLEND_SECONDS, planned.duration_seconds));
     }
   }
-  return Math.max(2, Math.min(12, numericValue(els.transitionSeconds, liveSession.transitionSeconds)));
+  return Math.max(2, Math.min(MAX_BLEND_SECONDS, numericValue(els.transitionSeconds, liveSession.transitionSeconds)));
 }
 
-function aiPlaybackRateForNext(nextTrack, technique = null) {
-  if (technique === "tempo_handoff") {
+// Rate for the incoming song so its beats match what the room hears right now
+// (the outgoing song's native BPM times its current playback rate).
+function aiPlaybackRateForNext(currentTrack, currentRate, nextTrack, technique = null) {
+  if (technique === "tempo_handoff" || !currentTrack?.bpm || !nextTrack?.bpm) {
     return 1;
   }
-  const current = liveSession?.decodedQueue?.[liveSession.currentIndex];
-  if (!current?.bpm || !nextTrack?.bpm) {
-    return 1;
+  const rate = 1 / foldedTempoRatio(currentTrack.bpm * currentRate, nextTrack.bpm);
+  return isSafeTempoRatio(rate) ? rate : 1;
+}
+
+// After the blend, ease a pitched song back to its own tempo over ~16 beats so
+// small adjustments never pile up from song to song.
+function scheduleTempoGlideHome(source, track, rate, startTime) {
+  if (!source?.playbackRate || Math.abs(rate - 1) < 0.002) {
+    return null;
   }
-  const ratio = current.bpm / nextTrack.bpm;
-  return ratio >= 0.94 && ratio <= 1.06 ? ratio : 1;
+  const glideSeconds = Math.max(6, Math.min(14, (16 * 60) / (track.bpm || 120)));
+  source.playbackRate.setValueAtTime(rate, startTime);
+  source.playbackRate.linearRampToValueAtTime(1, startTime + glideSeconds);
+  return { start: startTime, end: startTime + glideSeconds };
+}
+
+// Freeze the outgoing song's tempo for the blend (it may still be gliding home).
+function holdPlaybackRate(source, time, rate) {
+  const param = source?.playbackRate;
+  if (!param) {
+    return;
+  }
+  if (typeof param.cancelAndHoldAtTime === "function") {
+    param.cancelAndHoldAtTime(time);
+  } else {
+    param.cancelScheduledValues(time);
+  }
+  param.setValueAtTime(rate, time);
 }
 
 function scheduleTempoHandoff(source, currentRate, currentTrack, nextTrack, startTime, duration, technique) {
   if (technique !== "tempo_handoff" || !source?.playbackRate || !currentTrack?.bpm || !nextTrack?.bpm) {
     return;
   }
-  const targetRate = nextTrack.bpm / currentTrack.bpm;
-  if (targetRate < 0.94 || targetRate > 1.06) {
+  const targetRate = foldedTempoRatio(currentTrack.bpm, nextTrack.bpm);
+  if (!isSafeTempoRatio(targetRate)) {
     return;
   }
   source.playbackRate.cancelScheduledValues(startTime);
@@ -1904,6 +2258,7 @@ async function createPlan(trackIds, options = {}) {
     mix_direction: els.mixDirection.value.trim() || null,
     use_transition_sfx: els.useSfx.checked,
     use_trained_style: els.useTrainedStyle.checked,
+    locked_track_count: options.lockedTrackCount || 0,
   };
 
   return fetchJson("/api/mixes/plan", {
@@ -2097,12 +2452,8 @@ function scheduleOutgoingLoopBed(track, transitionStart, transitionSeconds, plan
   }
 
   const { context } = liveSession;
-  const elapsed = Math.max(0, transitionStart - Number(liveSession.currentStartedAt || transitionStart));
-  const playbackRate = Math.max(0.1, Number(liveSession.currentPlaybackRate || 1));
-  const playhead = Math.min(
-    track.buffer.duration - 0.05,
-    Number(liveSession.currentStartOffset || 0) + elapsed * playbackRate,
-  );
+  const playbackRate = Math.max(0.1, playbackRateAt(transitionStart));
+  const playhead = Math.min(track.buffer.duration - 0.05, bufferPositionAt(transitionStart));
   const loopEnd = Math.max(loopSeconds, playhead);
   const loopStart = Math.max(0, loopEnd - loopSeconds);
   if (loopEnd - loopStart < 0.1) {

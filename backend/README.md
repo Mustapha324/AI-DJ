@@ -17,10 +17,15 @@ The original single-track analysis endpoint is still supported.
 - Batch MP3 analysis through `POST /api/tracks/analyze-batch`
 - Duplicate upload detection using content hashes
 - JSON storage for track analysis, mix records, and job status
-- Compatibility scoring by tempo, key, energy, and structure
+- Compatibility scoring by tempo (half/double-time aware), Camelot-wheel harmonic key matching (softened when key detection is unsure), energy, genre fit, and structure
+- Smart AI song order: optimizes the whole set for smooth pair-to-pair blends while following an energy arc (warm-up, peak, landing - or a straight build / wind-down when the vibe asks for it)
+- Recommended Next panel: ranked library picks for what should follow the current song, with reasons (tempo, Camelot move, energy lift/drop, vibe fit) and the suggested transition
+- Auto DJ: when the queue runs out during a live set, the best-matching unplayed song is added automatically so the music never stops
 - Automatic mix planning for two or more tracks with an optional genre/vibe direction
 - Learned style defaults for excerpt length, transition length, phrase behavior, and SFX density
 - Browser-side live deck with a draggable queue, Play Next, Transition Now, and Stop Live controls
+- Beat-synced live blends: every transition (including Mix Next Now) waits for the outgoing song's next bar line, incoming songs start on a downbeat, tempos are matched to what is actually playing, and pitched songs glide back to their native tempo after the blend
+- Bar-length blends: short 2-3 bar blends for risky pairs, up to 8-bar (max 16 s) blends when tempo and key are locked
 - Excerpt-based mixing so long songs or full DJ sets do not have to play end to end
 - Real WAV rendering with phrase-aware cue points, bass-swap crossfades, gain normalization, fade-in/fade-out, and clipping prevention
 - Match-aware rotation across clean fades, safe tempo handoffs, echo fades, filter blends, bass swaps, drop swaps, quick cuts, and beat-synced repeat/echo outros
@@ -48,7 +53,9 @@ backend/
 |   |   |-- mix_planner.py
 |   |   |-- mix_renderer.py
 |   |   |-- mix_storage.py
-|   |   `-- track_service.py
+|   |   |-- recommendation_service.py
+|   |   |-- track_service.py
+|   |   `-- vibe.py
 |   |-- static/
 |   |   |-- app.js
 |   |   |-- index.html
@@ -125,10 +132,12 @@ http://127.0.0.1:8000/docs
 6. Keep song timing on **Auto** to use a different researched play window for every song. Auto timing keeps the detected hype section before the outgoing blend.
 7. Switch song timing to **Manual** only when you want to set the same seconds-per-song cap yourself. Leave **Mix minutes** empty for an automatic total length.
 8. Use the **Live Queue** to drag songs into order, or click **Play Next** to cue a song after the current track.
-9. Keep **Trained style**, **AI song order**, and **DJ effects** on for the full automatic mix.
+9. Keep **Trained style**, **AI song order**, **DJ effects**, and **Auto DJ** on for the full automatic mix.
 10. Use **DJ Research** to inspect each song's auto play window, hype point, mix-in/mix-out cues, and transition matches.
 11. Click **Start Live Mix** to line up and start the browser deck. Use **Mix Next Now** to force the next blend.
-12. Click **Render Download** when you only want the final WAV output.
+12. Use **Recommended Next** to see the best songs to play after the current one (or after the end of your queue). **Play Next** cues a pick right after the playing song; **Add** puts it at the end.
+13. With **Auto DJ** on, the deck adds the top recommendation by itself whenever the queue runs out. Turn it off to let the last song play out and end the set.
+14. Click **Render Download** when you only want the final WAV output.
 
 Folder selection uses browser folder-upload support. Dragging a whole folder also works in browsers that expose dropped folder entries, such as current Chromium-based browsers.
 
@@ -182,6 +191,26 @@ The batch endpoint continues after individual file failures. Broken files should
 5. Click **Execute**.
 
 The response is ordered from best match to weakest match and includes a score breakdown for tempo, key, energy, and structure.
+
+## Swagger: Recommend The Next Song
+
+Use:
+
+```text
+POST /api/mixes/recommend-next
+```
+
+```json
+{
+  "current_track_id": "TRACK_ID",
+  "played_track_ids": ["ALREADY_PLAYED_ID"],
+  "queued_track_ids": ["ALREADY_QUEUED_ID"],
+  "mix_direction": "build into club energy",
+  "limit": 5
+}
+```
+
+Results are sorted best first and include `score`, `camelot`, `key_relation`, `energy_change_percent`, `suggested_technique`, and human-readable `reasons`. Played and queued songs are skipped unless `include_queued` is `true`.
 
 ## Swagger: Search Saved Tracks
 
@@ -239,9 +268,12 @@ Create a plan first:
   "auto_order": true,
   "mix_direction": "smooth house with club energy",
   "use_transition_sfx": true,
-  "use_trained_style": true
+  "use_trained_style": true,
+  "locked_track_count": 0
 }
 ```
+
+`locked_track_count` keeps that many leading tracks in place while AI song order arranges the rest. Party Mode uses it to keep the song that is already playing (and a **Play Next** pick) fixed when it re-plans the live lineup.
 
 4. Click **Execute**.
 5. Copy the returned `mix_id`.
@@ -295,7 +327,8 @@ The tests generate synthetic audio and do not require copyrighted music.
 - Rendering runs in-process in this MVP. Job records exist, but Redis/Celery/RQ are not wired in yet.
 - Beat tracking, key detection, and section labels are estimates.
 - BPM matching is conservative and only stretches within a safe range.
-- The mix planner uses deterministic rules, not machine learning.
+- The mix planner and recommender use deterministic scoring and search, not machine learning.
+- Auto DJ and recommendations only pick from songs already analyzed and saved in the local library.
 - The renderer uses mono audio internally for reliability in this first pass.
 
 ## Recommended Next Step
